@@ -5,14 +5,19 @@ on:
     branches: [main]
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # Pinned: ubuntu-latest moves to Ubuntu 26 on 2026-10-19. Revisit when 24.04 nears EOL or on a deliberate bump.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --features testing
   fuzz-build-replay:
-    runs-on: ubuntu-latest
+    # Pinned runner, see the note on the test job.
+    runs-on: ubuntu-24.04
+    env:
+      # Fuzz crate only (fuzz/ is its own workspace): no fsync, avoids libFuzzer timeouts. Not set in the test job.
+      LIBSQLITE3_FLAGS: -DSQLITE_NO_SYNC
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@nightly
