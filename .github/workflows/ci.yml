@@ -1,0 +1,30 @@
+name: ci
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --features testing
+  fuzz-build-replay:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+      - run: cargo install cargo-fuzz --locked
+      - run: cargo +nightly fuzz build
+      - name: Replay committed corpora
+        run: |
+          for t in wal_parse wal_differential replay_apply store_capture statements_split; do
+            extra=""
+            if [ "$t" = wal_parse ]; then extra="-max_len=70000"; fi
+            cargo +nightly fuzz run "$t" "fuzz/corpus/$t" -- -runs=0 -rss_limit_mb=1024 -dict=fuzz/wal.dict $extra
+          done

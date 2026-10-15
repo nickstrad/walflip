@@ -3,19 +3,31 @@ DIR := walflip-data
 AT250 := /tmp/at250.db
 AT500 := /tmp/at500.db
 
-.PHONY: build test fuzz seed demo clean distclean
+.PHONY: build test fuzz fuzz-replay seed demo clean distclean
 
 build:
 	cargo build --release
 
 # Unit, property and end-to-end tests
 test:
-	cargo test
+	cargo test --features testing
 
 # Coverage-guided fuzzing (needs nightly + cargo-fuzz); FUZZ_SECS per target
 FUZZ_SECS ?= 30
+FUZZ_TARGETS := wal_parse wal_differential replay_apply store_capture statements_split
 fuzz:
-	cargo +nightly fuzz run wal_parse -- -max_total_time=$(FUZZ_SECS)
+	@for t in $(FUZZ_TARGETS); do \
+	  extra=""; [ $$t = wal_parse ] && extra="-max_len=70000"; \
+	  echo "== $$t =="; \
+	  cargo +nightly fuzz run $$t -- -max_total_time=$(FUZZ_SECS) -rss_limit_mb=1024 -dict=fuzz/wal.dict $$extra || exit 1; \
+	done
+
+# Replay committed corpora once (regression check)
+fuzz-replay:
+	@for t in $(FUZZ_TARGETS); do \
+	  extra=""; [ $$t = wal_parse ] && extra="-max_len=70000"; \
+	  cargo +nightly fuzz run $$t fuzz/corpus/$$t -- -runs=0 -rss_limit_mb=1024 -dict=fuzz/wal.dict $$extra || exit 1; \
+	done
 
 # Create walflip-data/processes/ and seed it with 500 changes
 seed: build
