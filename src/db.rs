@@ -183,7 +183,13 @@ pub fn list(root: &Path) -> Result<Vec<DbSummary>> {
             continue;
         }
         let Ok(name) = e.file_name().into_string() else { continue };
-        let commits = Store::open(&path.join("meta.db"))?.commit_count()?;
+        // A folder with a `live.db` but no `meta.db` is not a walflip database: skipped, and
+        // nothing is created in it.
+        let meta = path.join("meta.db");
+        if !meta.is_file() {
+            continue;
+        }
+        let commits = Store::open_existing(&meta)?.commit_count()?;
         out.push(DbSummary { name, commits });
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
@@ -394,7 +400,7 @@ pub struct LogEntry {
 
 /// Commits in ascending order. `from_end` selects the last `limit` commits instead of the first.
 pub fn log(db: &Db, limit: u64, from_end: bool) -> Result<Vec<LogEntry>> {
-    let store = Store::open(&db.meta)?;
+    let store = Store::open_existing(&db.meta)?;
     let dir = if from_end { "DESC" } else { "ASC" };
     let mut st = store.conn().prepare(&format!(
         "SELECT idx, frames, db_pages, label FROM (
@@ -421,7 +427,7 @@ pub struct Status {
 }
 
 pub fn status(db: &Db) -> Result<Status> {
-    let store = Store::open(&db.meta)?;
+    let store = Store::open_existing(&db.meta)?;
     Ok(Status {
         page_size: store.page_size()?,
         commits: store.commit_count()?,
@@ -436,7 +442,7 @@ pub fn clone_at(db: &Db, n: u64, out: &Path) -> Result<usize> {
     if out.exists() {
         bail!("{} already exists", out.display());
     }
-    let store = Store::open(&db.meta)?;
+    let store = Store::open_existing(&db.meta)?;
     let total = store.commit_count()?;
     if n > total {
         bail!("only {total} commits captured, cannot clone -n {n}");

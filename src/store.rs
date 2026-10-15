@@ -198,6 +198,22 @@ impl Store {
         Ok(Self { conn })
     }
 
+    /// Open an existing `meta.db` read-write (so a hot rollback journal left by a crashed writer
+    /// is rolled back, which `SQLITE_OPEN_READ_ONLY` cannot do) without creating the file and
+    /// without running the schema. Fails with a clear error when `meta.db` is absent. For the
+    /// read paths (`list`, `status`, `log`, `clone`), which must not write into the folder.
+    pub fn open_existing(path: &Path) -> Result<Self> {
+        if !path.is_file() {
+            anyhow::bail!("{} does not exist (no captured history here)", path.display());
+        }
+        let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
+            | rusqlite::OpenFlags::SQLITE_OPEN_URI
+            | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        let conn = Connection::open_with_flags(path, flags)?;
+        conn.busy_timeout(DEFAULT_BUSY_TIMEOUT)?;
+        Ok(Self { conn })
+    }
+
     pub fn conn(&self) -> &Connection {
         &self.conn
     }
