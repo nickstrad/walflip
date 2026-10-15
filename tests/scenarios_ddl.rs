@@ -96,10 +96,8 @@ fn s6_ddl_plain_cli_and_lib_agree() {
 }
 
 #[test]
-#[ignore = "KNOWN FAILING: B1, fixed by T13"]
 fn s6_ddl_quoted_names_cli() {
-    // INV-47: `clone` summarize must work for any table name SQLite accepts. Today it fails
-    // with `unrecognized token: """ in SELECT count(*) FROM "a"b"` (unquoted identifier, B1).
+    // INV-47: `clone` summarize must work for any table name SQLite accepts (B1, fixed).
     s6_quoted().run(Driver::Cli);
 }
 

@@ -95,13 +95,11 @@ fn s12_concurrent_clones() {
         }
     }
 
-    // The racers: at least one wins; a loser must refuse with `already exists`; the file is a
-    // complete clone either way. The plan wants "exactly one succeeds", but `clone_at` checks
-    // `out.exists()` and later calls `fs::write` (check-then-act), so both racers report
-    // success in roughly 1 run in 3 (suspected B9, not fixed in Wave 3). This scenario only
-    // asserts what holds today so it stays green and stable.
+    // The racers (B9): `clone_at` opens the output with create_new, so exactly one succeeds and
+    // the other fails with `already exists`; the file is a complete clone.
     let racers = &done[8..];
-    assert!(racers.iter().any(|f| f.status.success()), "INV-35: both racers failed: {racers:?}");
+    let wins = racers.iter().filter(|f| f.status.success()).count();
+    assert_eq!(wins, 1, "INV-35: expected exactly one racer to succeed, got {wins}: {racers:?}");
     for f in racers.iter().filter(|f| !f.status.success()) {
         assert!(f.stderr.contains("already exists"), "INV-35: racer failed for another reason: {}", f.stderr);
     }

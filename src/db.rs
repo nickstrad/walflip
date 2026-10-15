@@ -3,7 +3,8 @@
 use crate::{replay, store::Store};
 use anyhow::{bail, Context, Result};
 use rusqlite::{Connection, OpenFlags};
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 
 const MAX_NAME: usize = 64;
@@ -232,7 +233,18 @@ pub fn clone_at(db: &Db, n: u64, out: &Path) -> Result<usize> {
     )?;
     let max_pages = base_pages.max(max_recorded.unwrap_or(0) as u64).min(u32::MAX as u64) as u32;
     replay::apply(&mut image, page_size, frames.iter().map(|(p, d)| (*p, d.as_slice())), db_pages, max_pages)?;
-    fs::write(out, &image)?;
+    // create_new closes the check-then-act gap: a racer that loses gets AlreadyExists and must not
+    // touch the winner's file.
+    let mut f = match OpenOptions::new().write(true).create_new(true).open(out) {
+        Ok(f) => f,
+        Err(e) if e.kind() == ErrorKind::AlreadyExists => bail!("{} already exists", out.display()),
+        Err(e) => return Err(e.into()),
+    };
+    if let Err(e) = f.write_all(&image) {
+        drop(f);
+        let _ = fs::remove_file(out);
+        return Err(e.into());
+    }
     Ok(frames.len())
 }
 
@@ -256,7 +268,8 @@ pub fn summarize(path: &Path) -> Result<Summary> {
         .collect::<std::result::Result<_, _>>()?;
     let mut tables = Vec::new();
     for t in names {
-        let c: u64 = conn.query_row(&format!("SELECT count(*) FROM \"{t}\""), [], |r| r.get(0))?;
+        let quoted = format!("\"{}\"", t.replace('"', "\"\""));
+        let c: u64 = conn.query_row(&format!("SELECT count(*) FROM {quoted}"), [], |r| r.get(0))?;
         tables.push((t, c));
     }
     Ok(Summary { integrity, tables })
@@ -291,6 +304,30 @@ mod tests {
             clone_at(&d, n, &out).unwrap();
             assert_eq!(summarize(&out).unwrap().integrity, "ok", "commit {n}");
         }
+    }
+
+    #[test]
+    fn summarize_counts_tables_with_doubled_quotes_in_names() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = Db::new(tmp.path(), "quoted").unwrap();
+        create(&d, Some(r#"CREATE TABLE "a""b"(x INTEGER); INSERT INTO "a""b" VALUES (1), (2);"#)).unwrap();
+        let out = tmp.path().join("c.db");
+        clone_at(&d, 0, &out).unwrap();
+        let s = summarize(&out).unwrap();
+        assert_eq!(s.integrity, "ok");
+        assert!(s.tables.contains(&(r#"a"b"#.to_string(), 2)), "{:?}", s.tables);
+    }
+
+    #[test]
+    fn clone_refuses_existing_output_and_keeps_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = Db::new(tmp.path(), "exists").unwrap();
+        create(&d, Some("CREATE TABLE a(x);")).unwrap();
+        let out = tmp.path().join("c.db");
+        fs::write(&out, b"keep me").unwrap();
+        let err = clone_at(&d, 0, &out).unwrap_err().to_string();
+        assert!(err.contains("already exists"), "{err}");
+        assert_eq!(fs::read(&out).unwrap(), b"keep me");
     }
 
     #[test]
