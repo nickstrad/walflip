@@ -10,7 +10,12 @@ use walflip::db::{self, Db};
 #[command(about = "Capture SQLite WAL commits and rebuild a database at any point in history")]
 struct Cli {
     /// Directory holding one folder per database
-    #[arg(long, global = true, env = "WALFLIP_ROOT", default_value = "walflip-data")]
+    #[arg(
+        long,
+        global = true,
+        env = "WALFLIP_ROOT",
+        default_value = "walflip-data"
+    )]
     root: PathBuf,
     /// Database to operate on (a folder under --root)
     #[arg(long, global = true, env = "WALFLIP_DB")]
@@ -73,21 +78,30 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let root = cli.root;
     let open = || -> Result<Db> {
-        let name = cli.db.as_deref().context("pass --db <name> (or set WALFLIP_DB)")?;
+        let name = cli
+            .db
+            .as_deref()
+            .context("pass --db <name> (or set WALFLIP_DB)")?;
         Db::existing(&root, name)
     };
 
     match cli.cmd {
         Cmd::Create { name, schema } => {
             let d = Db::new(&root, &name)?;
-            let sql = schema.as_deref().map(|p| read_sql(p, "schema")).transpose()?;
+            let sql = schema
+                .as_deref()
+                .map(|p| read_sql(p, "schema"))
+                .transpose()?;
             let c = db::create(&d, sql.as_deref())?;
             println!("created {} (page size {})", d.dir.display(), c.page_size);
         }
         Cmd::List => {
             let dbs = db::list(&root)?;
             if dbs.is_empty() {
-                println!("no databases under {} (try `walflip create <name>`)", root.display());
+                println!(
+                    "no databases under {} (try `walflip create <name>`)",
+                    root.display()
+                );
             } else {
                 println!("{:<24} {:>8}", "name", "commits");
                 for d in dbs {
@@ -107,7 +121,9 @@ fn main() -> Result<()> {
         Cmd::Exec { sql, script } => {
             let stmts = match (script, sql) {
                 (Some(path), _) => db::split_script(&read_sql(&path, "script")?)?,
-                (None, Some(sql)) if sql == "-" => db::parse_statements(&read_sql(Path::new("-"), "stdin")?),
+                (None, Some(sql)) if sql == "-" => {
+                    db::parse_statements(&read_sql(Path::new("-"), "stdin")?)
+                }
                 (None, Some(sql)) => vec![sql],
                 (None, None) => unreachable!("clap requires sql or --script"),
             };
@@ -123,10 +139,20 @@ fn main() -> Result<()> {
             println!("captured {} commit(s)", r.captured);
         }
         Cmd::Log { limit, head, all } => {
-            let (limit, from_end) = if all { (i64::MAX as u64, false) } else { (limit, !head) };
+            let (limit, from_end) = if all {
+                (i64::MAX as u64, false)
+            } else {
+                (limit, !head)
+            };
             println!("{:>5} {:>6} {:>8}  sql", "n", "frames", "db_pages");
             for e in db::log(&open()?, limit, from_end)? {
-                println!("{:>5} {:>6} {:>8}  {}", e.n, e.frames, e.db_pages, db::display_label(&e.sql));
+                println!(
+                    "{:>5} {:>6} {:>8}  {}",
+                    e.n,
+                    e.frames,
+                    e.db_pages,
+                    db::display_label(&e.sql)
+                );
             }
         }
         Cmd::Status => {
@@ -139,12 +165,19 @@ fn main() -> Result<()> {
                 None => println!("live wal  : absent (checkpointed)"),
             }
             if s.uncaptured > 0 {
-                println!("uncaptured: {} (next exec stores them as {})", s.uncaptured, db::RECOVERED_LABEL);
+                println!(
+                    "uncaptured: {} (next exec stores them as {})",
+                    s.uncaptured,
+                    db::RECOVERED_LABEL
+                );
             }
         }
         Cmd::Clone { n, out } => {
             let frames = db::clone_at(&open()?, n, &out)?;
-            println!("cloned commits 1..={n} ({frames} frames replayed) -> {}", out.display());
+            println!(
+                "cloned commits 1..={n} ({frames} frames replayed) -> {}",
+                out.display()
+            );
             report(&out)?;
         }
     }

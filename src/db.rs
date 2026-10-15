@@ -5,12 +5,12 @@ use crate::store::{wal_mark, Store, WalMark, WriteLock};
 use anyhow::{bail, Context, Result};
 use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
 use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior};
-use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
 use std::fs::{self, OpenOptions};
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 const MAX_NAME: usize = 64;
 
@@ -18,7 +18,8 @@ const MAX_NAME: usize = 64;
 fn validate_name(s: &str) -> Result<()> {
     let ok = !s.is_empty()
         && s.len() <= MAX_NAME
-        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
     if !ok {
         bail!("invalid database name '{s}': use 1-{MAX_NAME} letters, digits, '_' or '-'");
     }
@@ -49,7 +50,10 @@ impl Db {
     pub fn existing(root: &Path, name: &str) -> Result<Self> {
         let db = Self::new(root, name)?;
         if !db.live.exists() {
-            bail!("no database named '{name}' under {} (see `walflip list`)", root.display());
+            bail!(
+                "no database named '{name}' under {} (see `walflip list`)",
+                root.display()
+            );
         }
         Ok(db)
     }
@@ -63,7 +67,11 @@ impl Db {
 
 /// Split SQL text into statements: one per non-blank line.
 pub fn parse_statements(text: &str) -> Vec<String> {
-    text.lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect()
+    text.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(String::from)
+        .collect()
 }
 
 /// Split an SQL script into statements the way the `sqlite3` shell does (plan Q5, `exec
@@ -106,7 +114,9 @@ pub fn split_script(text: &str) -> Result<Vec<String>> {
 /// SQLite's `sqlite3_complete`: `s` ends with a `;` that ends a statement (not one inside a
 /// string, comment or unfinished `CREATE TRIGGER`). False if `s` contains a NUL byte.
 pub fn is_complete(s: &str) -> bool {
-    let Ok(c) = std::ffi::CString::new(s) else { return false };
+    let Ok(c) = std::ffi::CString::new(s) else {
+        return false;
+    };
     // SAFETY: `c` is a valid NUL-terminated string that outlives the call.
     unsafe { rusqlite::ffi::sqlite3_complete(c.as_ptr()) != 0 }
 }
@@ -202,7 +212,9 @@ fn deny_reason(action: &AuthAction<'_>, mode: AuthMode) -> Option<String> {
         AuthAction::Attach { filename } if mode == AuthMode::Vacuum && filename.is_empty() => None,
         AuthAction::Attach { .. } => Some("ATTACH is not allowed".into()),
         AuthAction::Detach { .. } => Some("DETACH is not allowed".into()),
-        AuthAction::Pragma { pragma_name, .. } if pragma_name.eq_ignore_ascii_case("journal_mode") => {
+        AuthAction::Pragma { pragma_name, .. }
+            if pragma_name.eq_ignore_ascii_case("journal_mode") =>
+        {
             Some("PRAGMA journal_mode is not allowed (walflip manages WAL mode)".into())
         }
         AuthAction::Transaction { .. } if mode == AuthMode::Statement => Some(
@@ -326,7 +338,9 @@ pub fn list(root: &Path) -> Result<Vec<DbSummary>> {
         if !path.join("live.db").exists() {
             continue;
         }
-        let Ok(name) = e.file_name().into_string() else { continue };
+        let Ok(name) = e.file_name().into_string() else {
+            continue;
+        };
         // A folder with a `live.db` but no `meta.db` is not a walflip database: skipped, and
         // nothing is created in it.
         let meta = path.join("meta.db");
@@ -381,7 +395,11 @@ pub struct ExecFailed {
 
 impl std::fmt::Display for ExecFailed {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "statement {} failed; {} commit(s) were captured before it stopped", self.statement, self.captured)?;
+        write!(
+            f,
+            "statement {} failed; {} commit(s) were captured before it stopped",
+            self.statement, self.captured
+        )?;
         if self.recovered > 0 {
             write!(f, " ({} of them {RECOVERED_LABEL})", self.recovered)?;
         }
@@ -434,7 +452,12 @@ pub fn exec_with(db: &Db, statements: &[String], busy: Duration) -> Result<ExecR
 /// slipping in there, the one window the locks cannot close). Always `None` outside tests.
 type AfterCommit = Option<Box<dyn Fn()>>;
 
-fn exec_inner(db: &Db, statements: &[String], busy: Duration, after_commit: AfterCommit) -> Result<ExecReport> {
+fn exec_inner(
+    db: &Db,
+    statements: &[String],
+    busy: Duration,
+    after_commit: AfterCommit,
+) -> Result<ExecReport> {
     let mut store = Store::open_with_timeout(&db.meta, busy)?;
     let conn = Connection::open(&db.live)?;
     sandbox_setup(&conn)?;
@@ -460,7 +483,11 @@ fn exec_inner(db: &Db, statements: &[String], busy: Duration, after_commit: Afte
             if r.captured == 0 {
                 return Err(e);
             }
-            return Err(e.context(ExecFailed { captured: r.captured, recovered: r.recovered, statement: i + 1 }));
+            return Err(e.context(ExecFailed {
+                captured: r.captured,
+                recovered: r.recovered,
+                statement: i + 1,
+            }));
         }
     }
     Ok(s.report)
@@ -540,7 +567,10 @@ impl<'a> ExecState<'a> {
     fn recover(&mut self, lock: &WriteLock<'_>) -> Result<WalMark> {
         let before = wal_mark(&self.wal);
         if self.last_mark.as_ref() != Some(&before) {
-            let n = lock.capture(&self.wal, RECOVERED_LABEL).context("capturing commits found in the WAL")?.added;
+            let n = lock
+                .capture(&self.wal, RECOVERED_LABEL)
+                .context("capturing commits found in the WAL")?
+                .added;
             self.report.recovered += n;
             self.report.captured += n;
         }
@@ -550,14 +580,22 @@ impl<'a> ExecState<'a> {
     /// Capture what the statement (result `r`) committed, labelled `stmt`, and release the history
     /// lock. Returns the number of commits added; the caller decides whether more than one is an
     /// error.
-    fn finish(&mut self, lock: WriteLock<'_>, before: WalMark, stmt: &str, r: Result<()>) -> Result<usize> {
+    fn finish(
+        &mut self,
+        lock: WriteLock<'_>,
+        before: WalMark,
+        stmt: &str,
+        r: Result<()>,
+    ) -> Result<usize> {
         if let Err(e) = r {
             // Backstop: anything that reached live.db despite the error must reach history too.
             // Skip capture when the WAL is untouched so a clean failure leaves meta.db as is.
             let n = if wal_mark(&self.wal) == before {
                 0
             } else {
-                let c = lock.capture(&self.wal, stmt).with_context(|| format!("{e:#}"))?;
+                let c = lock
+                    .capture(&self.wal, stmt)
+                    .with_context(|| format!("{e:#}"))?;
                 self.last_mark = Some(c.mark);
                 c.added
             };
@@ -566,7 +604,9 @@ impl<'a> ExecState<'a> {
             if n == 0 {
                 return Err(e);
             }
-            return Err(e.context(format!("{n} commit(s) from this statement reached live.db and were captured")));
+            return Err(e.context(format!(
+                "{n} commit(s) from this statement reached live.db and were captured"
+            )));
         }
         if let Some(hook) = &self.after_commit {
             hook();
@@ -580,7 +620,9 @@ impl<'a> ExecState<'a> {
 }
 
 fn lock_history(store: &mut Store) -> Result<WriteLock<'_>> {
-    store.lock().map_err(|e| locked(e, "history (meta.db): another walflip exec is running"))
+    store
+        .lock()
+        .map_err(|e| locked(e, "history (meta.db): another walflip exec is running"))
 }
 
 /// How [`exec`] treats a statement with respect to `VACUUM` (plan Q4).
@@ -597,7 +639,9 @@ enum VacuumKind {
 
 fn vacuum_kind(stmt: &str) -> VacuumKind {
     let s = stmt.trim_start();
-    let word_end = s.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).unwrap_or(s.len());
+    let word_end = s
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .unwrap_or(s.len());
     if !s[..word_end].eq_ignore_ascii_case("vacuum") {
         return VacuumKind::No;
     }
@@ -623,13 +667,16 @@ fn run_vacuum(conn: &Connection, mode: &AtomicU8, denied: &Denied, stmt: &str) -
     mode.store(AuthMode::Vacuum as u8, Ordering::SeqCst);
     let r = conn.execute_batch("VACUUM");
     mode.store(AuthMode::Own as u8, Ordering::SeqCst);
-    with_denial(r, denied, format!("failed: {stmt}")).map_err(|e| locked(e, "live.db: another process is writing it"))
+    with_denial(r, denied, format!("failed: {stmt}"))
+        .map_err(|e| locked(e, "live.db: another process is writing it"))
 }
 
 /// Name the lock in a busy error; pass other errors through.
 fn locked(e: anyhow::Error, what: &str) -> anyhow::Error {
     if crate::store::is_busy(&e) {
-        e.context(format!("locked: gave up waiting for the write lock on {what}"))
+        e.context(format!(
+            "locked: gave up waiting for the write lock on {what}"
+        ))
     } else {
         e
     }
@@ -641,7 +688,8 @@ fn run_statement(tx: Transaction<'_>, mode: &AtomicU8, denied: &Denied, stmt: &s
     let r = tx.execute_batch(stmt);
     mode.store(AuthMode::Own as u8, Ordering::SeqCst);
     with_denial(r, denied, format!("failed: {stmt}"))?;
-    tx.commit().with_context(|| format!("failed to commit: {stmt}"))?;
+    tx.commit()
+        .with_context(|| format!("failed to commit: {stmt}"))?;
     Ok(())
 }
 
@@ -659,7 +707,11 @@ pub const LOG_LABEL_CHARS: usize = 90;
 /// shown as the two characters `\n`, then the result is cut to [`LOG_LABEL_CHARS`] characters.
 /// Display only: the stored label is unchanged.
 pub fn display_label(sql: &str) -> String {
-    sql.replace("\r\n", "\n").replace(['\n', '\r'], "\\n").chars().take(LOG_LABEL_CHARS).collect()
+    sql.replace("\r\n", "\n")
+        .replace(['\n', '\r'], "\\n")
+        .chars()
+        .take(LOG_LABEL_CHARS)
+        .collect()
 }
 
 /// Commits in ascending order. `from_end` selects the last `limit` commits instead of the first.
@@ -674,7 +726,12 @@ pub fn log(db: &Db, limit: u64, from_end: bool) -> Result<Vec<LogEntry>> {
          ) ORDER BY idx"
     ))?;
     let rows = st.query_map([limit], |r| {
-        Ok(LogEntry { n: r.get(0)?, frames: r.get(1)?, db_pages: r.get(2)?, sql: r.get(3)? })
+        Ok(LogEntry {
+            n: r.get(0)?,
+            frames: r.get(1)?,
+            db_pages: r.get(2)?,
+            sql: r.get(3)?,
+        })
     })?;
     Ok(rows.collect::<std::result::Result<_, _>>()?)
 }
@@ -695,7 +752,9 @@ pub fn status(db: &Db) -> Result<Status> {
     Ok(Status {
         page_size: store.page_size()?,
         commits: store.commit_count()?,
-        frames: store.conn().query_row("SELECT count(*) FROM frames", [], |r| r.get(0))?,
+        frames: store
+            .conn()
+            .query_row("SELECT count(*) FROM frames", [], |r| r.get(0))?,
         wal_bytes: fs::metadata(db.wal_path()).ok().map(|m| m.len()),
         uncaptured: store.uncaptured(&db.wal_path())?,
     })
@@ -711,7 +770,9 @@ pub fn clone_at(db: &Db, n: u64, out: &Path) -> Result<usize> {
     if n > total {
         bail!("only {total} commits captured, cannot clone -n {n}");
     }
-    let page_size = store.page_size()?.context("database has no recorded page size")? as usize;
+    let page_size = store
+        .page_size()?
+        .context("database has no recorded page size")? as usize;
 
     let mut st = store
         .conn()
@@ -721,7 +782,13 @@ pub fn clone_at(db: &Db, n: u64, out: &Path) -> Result<usize> {
         .collect::<std::result::Result<_, _>>()?;
     // The commit frame records the db size; applying it shrinks the image if later commits freed pages.
     let db_pages: Option<u32> = if n > 0 {
-        Some(store.conn().query_row("SELECT db_pages FROM commits WHERE idx=?1", [n], |r| r.get(0))?)
+        Some(
+            store
+                .conn()
+                .query_row("SELECT db_pages FROM commits WHERE idx=?1", [n], |r| {
+                    r.get(0)
+                })?,
+        )
     } else {
         None
     };
@@ -735,8 +802,16 @@ pub fn clone_at(db: &Db, n: u64, out: &Path) -> Result<usize> {
         [n],
         |r| r.get(0),
     )?;
-    let max_pages = base_pages.max(max_recorded.unwrap_or(0) as u64).min(u32::MAX as u64) as u32;
-    replay::apply(&mut image, page_size, frames.iter().map(|(p, d)| (*p, d.as_slice())), db_pages, max_pages)?;
+    let max_pages = base_pages
+        .max(max_recorded.unwrap_or(0) as u64)
+        .min(u32::MAX as u64) as u32;
+    replay::apply(
+        &mut image,
+        page_size,
+        frames.iter().map(|(p, d)| (*p, d.as_slice())),
+        db_pages,
+        max_pages,
+    )?;
     // create_new closes the check-then-act gap: a racer that loses gets AlreadyExists and must not
     // touch the winner's file.
     let mut f = match OpenOptions::new().write(true).create_new(true).open(out) {
@@ -764,7 +839,9 @@ fn uri_encode_path(path: &Path) -> String {
     let mut out = String::new();
     for &b in path.as_os_str().as_encoded_bytes() {
         match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => out.push(b as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
+                out.push(b as char)
+            }
             _ => out.push_str(&format!("%{b:02X}")),
         }
     }
@@ -817,13 +894,24 @@ mod tests {
     fn clone_works_after_a_later_commit_shrinks_the_db() {
         let tmp = tempfile::tempdir().unwrap();
         let d = Db::new(tmp.path(), "shrink").unwrap();
-        create(&d, Some("PRAGMA auto_vacuum=FULL; CREATE TABLE a(x BLOB); CREATE TABLE b(x BLOB);")).unwrap();
+        create(
+            &d,
+            Some("PRAGMA auto_vacuum=FULL; CREATE TABLE a(x BLOB); CREATE TABLE b(x BLOB);"),
+        )
+        .unwrap();
         let big = "INSERT INTO a VALUES (zeroblob(100000));".to_string();
         exec(&d, &[big]).unwrap();
         exec(&d, &["DROP TABLE a;".to_string()]).unwrap();
         let total = Store::open(&d.meta).unwrap().commit_count().unwrap();
-        let pages: Vec<u64> = log(&d, 10, false).unwrap().iter().map(|e| e.db_pages).collect();
-        assert!(pages.windows(2).any(|w| w[1] < w[0]), "db never shrank: {pages:?}");
+        let pages: Vec<u64> = log(&d, 10, false)
+            .unwrap()
+            .iter()
+            .map(|e| e.db_pages)
+            .collect();
+        assert!(
+            pages.windows(2).any(|w| w[1] < w[0]),
+            "db never shrank: {pages:?}"
+        );
         for n in 0..=total {
             let out = tmp.path().join(format!("c{n}.db"));
             clone_at(&d, n, &out).unwrap();
@@ -835,12 +923,20 @@ mod tests {
     fn summarize_counts_tables_with_doubled_quotes_in_names() {
         let tmp = tempfile::tempdir().unwrap();
         let d = Db::new(tmp.path(), "quoted").unwrap();
-        create(&d, Some(r#"CREATE TABLE "a""b"(x INTEGER); INSERT INTO "a""b" VALUES (1), (2);"#)).unwrap();
+        create(
+            &d,
+            Some(r#"CREATE TABLE "a""b"(x INTEGER); INSERT INTO "a""b" VALUES (1), (2);"#),
+        )
+        .unwrap();
         let out = tmp.path().join("c.db");
         clone_at(&d, 0, &out).unwrap();
         let s = summarize(&out).unwrap();
         assert_eq!(s.integrity, "ok");
-        assert!(s.tables.contains(&(r#"a"b"#.to_string(), 2)), "{:?}", s.tables);
+        assert!(
+            s.tables.contains(&(r#"a"b"#.to_string(), 2)),
+            "{:?}",
+            s.tables
+        );
     }
 
     #[test]
@@ -853,7 +949,15 @@ mod tests {
         let other = Db::new(tmp.path(), "other").unwrap();
         create(&other, Some("CREATE TABLE decoy(x);")).unwrap();
         clone_at(&other, 0, &decoy).unwrap();
-        for name in ["a?b.db", "c#d.db", "e%41.db", "sp ace.db", "u\u{e9}\u{4e2d}.db", "q?immutable=0#.db", "100%.db"] {
+        for name in [
+            "a?b.db",
+            "c#d.db",
+            "e%41.db",
+            "sp ace.db",
+            "u\u{e9}\u{4e2d}.db",
+            "q?immutable=0#.db",
+            "100%.db",
+        ] {
             let out = tmp.path().join(name);
             clone_at(&d, 0, &out).unwrap();
             let s = summarize(&out).unwrap();
@@ -885,7 +989,11 @@ mod tests {
     }
 
     fn labels(d: &Db) -> Vec<String> {
-        log(d, 100, false).unwrap().into_iter().map(|e| e.sql).collect()
+        log(d, 100, false)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.sql)
+            .collect()
     }
 
     /// INV-38 backstop, kept covered now that orphans are recovered up front: a foreign writer
@@ -907,7 +1015,10 @@ mod tests {
         assert_eq!(labels(&d), [ins("a"), ins("a")]);
         let out = tmp.path().join("all.db");
         clone_at(&d, 2, &out).unwrap();
-        let rows: i64 = Connection::open(&out).unwrap().query_row("SELECT count(*) FROM t", [], |r| r.get(0)).unwrap();
+        let rows: i64 = Connection::open(&out)
+            .unwrap()
+            .query_row("SELECT count(*) FROM t", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(rows, 2);
     }
 
@@ -922,8 +1033,14 @@ mod tests {
         holder.execute_batch("BEGIN IMMEDIATE").unwrap();
         let meta_before = fs::read(&d.meta).unwrap();
         let t = std::time::Instant::now();
-        let err = format!("{:#}", exec_with(&d, &[ins("b")], Duration::from_millis(200)).unwrap_err());
-        assert!(t.elapsed() >= Duration::from_millis(150), "did not wait for the lock");
+        let err = format!(
+            "{:#}",
+            exec_with(&d, &[ins("b")], Duration::from_millis(200)).unwrap_err()
+        );
+        assert!(
+            t.elapsed() >= Duration::from_millis(150),
+            "did not wait for the lock"
+        );
         assert!(err.contains("locked") && err.contains("meta.db"), "{err}");
         holder.execute_batch("ROLLBACK").unwrap();
         assert_eq!(fs::read(&d.meta).unwrap(), meta_before);
@@ -941,7 +1058,10 @@ mod tests {
         let d = kv_db(tmp.path(), "lw");
         let holder = Connection::open(&d.live).unwrap();
         holder.execute_batch("BEGIN IMMEDIATE").unwrap();
-        let err = format!("{:#}", exec_with(&d, &[ins("b")], Duration::from_millis(100)).unwrap_err());
+        let err = format!(
+            "{:#}",
+            exec_with(&d, &[ins("b")], Duration::from_millis(100)).unwrap_err()
+        );
         assert!(err.contains("locked") && err.contains("live.db"), "{err}");
         let mut s = Store::open_with_timeout(&d.meta, Duration::from_millis(1)).unwrap();
         s.lock().unwrap().commit().unwrap();
@@ -958,15 +1078,27 @@ mod tests {
         let d = kv_db(tmp.path(), "or");
         let ext = Connection::open(&d.live).unwrap();
         ext.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
-        ext.execute_batch(&format!("{}; {}", ins("x1"), ins("x1b"))).unwrap(); // 2 autocommits
+        ext.execute_batch(&format!("{}; {}", ins("x1"), ins("x1b")))
+            .unwrap(); // 2 autocommits
         let r = exec_with(&d, &[ins("a"), ins("b")], Duration::from_secs(5)).unwrap();
-        assert_eq!(r, ExecReport { captured: 4, recovered: 2 });
-        assert_eq!(labels(&d), [RECOVERED_LABEL, RECOVERED_LABEL, &ins("a"), &ins("b")]);
+        assert_eq!(
+            r,
+            ExecReport {
+                captured: 4,
+                recovered: 2
+            }
+        );
+        assert_eq!(
+            labels(&d),
+            [RECOVERED_LABEL, RECOVERED_LABEL, &ins("a"), &ins("b")]
+        );
 
         ext.execute_batch(&ins("x2")).unwrap();
         assert_eq!(status(&d).unwrap().uncaptured, 1);
         let err = exec(&d, &["INSERT INTO nope VALUES(1)".into()]).unwrap_err();
-        let f = err.downcast_ref::<ExecFailed>().expect("recovered count kept on failure");
+        let f = err
+            .downcast_ref::<ExecFailed>()
+            .expect("recovered count kept on failure");
         assert_eq!((f.captured, f.recovered), (1, 1));
         assert_eq!(labels(&d).last().map(String::as_str), Some(RECOVERED_LABEL));
         assert_eq!(status(&d).unwrap().uncaptured, 0);
@@ -975,7 +1107,15 @@ mod tests {
     /// Q4: only `^\s*VACUUM(\s+(main|"main"))?\s*;?\s*$` (any case) takes the VACUUM path.
     #[test]
     fn vacuum_kind_matches_strictly() {
-        for s in ["VACUUM", "vacuum;", "  Vacuum  ;  ", "VACUUM main", "vacuum MAIN;", "VACUUM \"main\"", "VACUUM\n\tmain\n;\n"] {
+        for s in [
+            "VACUUM",
+            "vacuum;",
+            "  Vacuum  ;  ",
+            "VACUUM main",
+            "vacuum MAIN;",
+            "VACUUM \"main\"",
+            "VACUUM\n\tmain\n;\n",
+        ] {
             assert_eq!(vacuum_kind(s), VacuumKind::Bare, "{s:?}");
         }
         for s in [
@@ -992,7 +1132,15 @@ mod tests {
         ] {
             assert_eq!(vacuum_kind(s), VacuumKind::Other, "{s:?}");
         }
-        for s in ["", ";", "vacuumx", "VACUUMS", "SELECT 1; VACUUM", "/* c */ VACUUM", "INSERT INTO vacuum VALUES(1)"] {
+        for s in [
+            "",
+            ";",
+            "vacuumx",
+            "VACUUMS",
+            "SELECT 1; VACUUM",
+            "/* c */ VACUUM",
+            "INSERT INTO vacuum VALUES(1)",
+        ] {
             assert_eq!(vacuum_kind(s), VacuumKind::No, "{s:?}");
         }
     }
@@ -1006,9 +1154,14 @@ mod tests {
         }
         for m in [AuthMode::Own, AuthMode::Statement, AuthMode::Vacuum] {
             assert!(deny_reason(&attach("x.db"), m).is_some(), "{m:?}");
-            assert!(deny_reason(&AuthAction::Detach { database_name: "x" }, m).is_some(), "{m:?}");
+            assert!(
+                deny_reason(&AuthAction::Detach { database_name: "x" }, m).is_some(),
+                "{m:?}"
+            );
         }
-        let begin = AuthAction::Transaction { operation: rusqlite::hooks::TransactionOperation::Begin };
+        let begin = AuthAction::Transaction {
+            operation: rusqlite::hooks::TransactionOperation::Begin,
+        };
         assert!(deny_reason(&begin, AuthMode::Statement).is_some());
         assert_eq!(deny_reason(&begin, AuthMode::Vacuum), None);
     }
@@ -1060,7 +1213,10 @@ mod tests {
     fn script_splits_on_statement_ending_semicolons_only() {
         assert!(split("").is_empty());
         assert!(split("  \n-- only a comment\n/* and ; a block */\n;;\n").is_empty());
-        assert_eq!(split("INSERT INTO t VALUES(1);INSERT INTO t VALUES(2);"), ["INSERT INTO t VALUES(1);", "INSERT INTO t VALUES(2);"]);
+        assert_eq!(
+            split("INSERT INTO t VALUES(1);INSERT INTO t VALUES(2);"),
+            ["INSERT INTO t VALUES(1);", "INSERT INTO t VALUES(2);"]
+        );
         // `;` inside strings, quoted identifiers and comments does not split.
         assert_eq!(
             split("INSERT INTO t VALUES('a;b', \"c;\", [d;], `e;`); -- trailing; comment\n"),
@@ -1095,7 +1251,9 @@ mod tests {
 
     #[test]
     fn script_of_2000_statements() {
-        let script: String = (0..2000).map(|i| format!("INSERT INTO t\n  VALUES({i}, 'a;{i}');\n")).collect();
+        let script: String = (0..2000)
+            .map(|i| format!("INSERT INTO t\n  VALUES({i}, 'a;{i}');\n"))
+            .collect();
         let stmts = split(&script);
         assert_eq!(stmts.len(), 2000);
         assert_eq!(stmts[1999], "INSERT INTO t\n  VALUES(1999, 'a;1999');");
@@ -1137,7 +1295,10 @@ mod tests {
 
     #[test]
     fn log_labels_are_one_line_and_cut() {
-        assert_eq!(display_label("CREATE TABLE u(\n  a\r\n);\r"), "CREATE TABLE u(\\n  a\\n);\\n");
+        assert_eq!(
+            display_label("CREATE TABLE u(\n  a\r\n);\r"),
+            "CREATE TABLE u(\\n  a\\n);\\n"
+        );
         let long = format!("SELECT\n{}", "x".repeat(200));
         let d = display_label(&long);
         assert_eq!(d.chars().count(), LOG_LABEL_CHARS);

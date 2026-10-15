@@ -48,9 +48,15 @@ const SEP: char = '\u{1f}';
 /// Body of the [`ENTRY`] test: returns at once in a normal run, otherwise runs the role and
 /// never returns.
 pub fn entry() {
-    let Ok(role) = std::env::var(ROLE_VAR) else { return };
+    let Ok(role) = std::env::var(ROLE_VAR) else {
+        return;
+    };
     let raw = std::env::var(ARGS_VAR).unwrap_or_default();
-    let args: Vec<String> = if raw.is_empty() { vec![] } else { raw.split(SEP).map(String::from).collect() };
+    let args: Vec<String> = if raw.is_empty() {
+        vec![]
+    } else {
+        raw.split(SEP).map(String::from).collect()
+    };
     match role.as_str() {
         "gate" => role_gate(&args),
         "reader" => role_reader(&args),
@@ -107,7 +113,9 @@ fn role_gate(args: &[String]) -> ! {
 /// transaction, waits for stdin EOF, re-runs the query in the same transaction, prints
 /// `RELEASED <value>`, ends the transaction and closes the connection normally.
 fn role_reader(args: &[String]) -> ! {
-    let [live, query] = args else { panic!("reader: want [live_db, query], got {args:?}") };
+    let [live, query] = args else {
+        panic!("reader: want [live_db, query], got {args:?}")
+    };
     let conn = Connection::open(live).unwrap();
     conn.execute_batch("BEGIN").unwrap();
     let before: i64 = conn.query_row(query, [], |r| r.get(0)).unwrap();
@@ -124,11 +132,14 @@ fn role_reader(args: &[String]) -> ! {
 /// args: `[live_db, stmt...]`. Runs each statement as its own autocommit transaction with
 /// `wal_autocheckpoint=0`, prints `WROTE <n>`, then exits without closing the connection.
 fn role_crash_writer(args: &[String]) -> ! {
-    let (live, stmts) = args.split_first().expect("crash-writer: want [live_db, stmt...]");
+    let (live, stmts) = args
+        .split_first()
+        .expect("crash-writer: want [live_db, stmt...]");
     let conn = Connection::open(live).unwrap();
     conn.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
     for s in stmts {
-        conn.execute_batch(s).unwrap_or_else(|e| panic!("crash-writer: {s}: {e}"));
+        conn.execute_batch(s)
+            .unwrap_or_else(|e| panic!("crash-writer: {s}: {e}"));
     }
     say(&format!("WROTE {}", stmts.len()));
     // No sqlite3_close: no checkpoint, no WAL cleanup, exactly like a killed process.
@@ -197,7 +208,12 @@ fn spawn(role: &str, args: &[String]) -> Helper {
         .unwrap();
     let stdin = child.stdin.take();
     let stdout = BufReader::new(child.stdout.take().unwrap());
-    Helper { child, stdin, stdout, seen: vec![] }
+    Helper {
+        child,
+        stdin,
+        stdout,
+        seen: vec![],
+    }
 }
 
 /// A walflip process (`--root <root> <args>`) that starts only when released. Waits until the
@@ -214,7 +230,11 @@ pub fn gated_walflip(root: &Path, args: &[&str]) -> Helper {
 /// the value the query returned inside it.
 pub fn reader(live: &Path, query: &str) -> (Helper, i64) {
     let mut h = spawn("reader", &[live.display().to_string(), query.to_string()]);
-    let v = h.wait_ready().trim().parse().expect("reader prints an integer");
+    let v = h
+        .wait_ready()
+        .trim()
+        .parse()
+        .expect("reader prints an integer");
     (h, v)
 }
 
@@ -239,7 +259,10 @@ impl Helper {
                 if let Some(mut e) = self.child.stderr.take() {
                     let _ = e.read_to_string(&mut err);
                 }
-                panic!("helper exited before READY; stdout {:?}; stderr {err}", self.seen);
+                panic!(
+                    "helper exited before READY; stdout {:?}; stderr {err}",
+                    self.seen
+                );
             }
             let line = line.trim_end().to_string();
             if let Some(rest) = line.strip_prefix(READY) {
@@ -269,7 +292,11 @@ impl Helper {
             e.read_to_string(&mut stderr).unwrap();
         }
         let status = self.child.wait().unwrap();
-        Finished { status, stdout, stderr }
+        Finished {
+            status,
+            stdout,
+            stderr,
+        }
     }
 }
 

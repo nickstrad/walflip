@@ -48,7 +48,11 @@ fn dump(path: &Path) -> Vec<(i64, i64)> {
 
 fn fresh(root: &Path) -> Db {
     let d = Db::new(root, "kv").unwrap();
-    db::create(&d, Some("CREATE TABLE kv(id INTEGER PRIMARY KEY, val INTEGER);")).unwrap();
+    db::create(
+        &d,
+        Some("CREATE TABLE kv(id INTEGER PRIMARY KEY, val INTEGER);"),
+    )
+    .unwrap();
     d
 }
 

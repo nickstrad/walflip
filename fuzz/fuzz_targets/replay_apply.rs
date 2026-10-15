@@ -46,7 +46,11 @@ fuzz_target!(|data: &[u8]| {
             1 => MAX_CAP + 1 + r.u32() % (u32::MAX - MAX_CAP), // beyond any cap
             _ => 1 + u32::from(r.u8()) % 12,
         };
-        let len = if tag >> 4 == 0 { ps - 1 - usize::from(tag & 1) } else { ps };
+        let len = if tag >> 4 == 0 {
+            ps - 1 - usize::from(tag & 1)
+        } else {
+            ps
+        };
         let mut page = vec![r.u8(); len];
         page[0] = frames.len() as u8;
         frames.push((pgno, page));

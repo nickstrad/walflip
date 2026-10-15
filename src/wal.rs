@@ -85,13 +85,23 @@ fn parse_header(buf: &[u8]) -> Result<Option<Header>> {
     if cksum != (be32(&buf[24..28]), be32(&buf[28..32])) {
         return Ok(None);
     }
-    Ok(Some(Header { big_endian, page_size, salt, cksum }))
+    Ok(Some(Header {
+        big_endian,
+        page_size,
+        salt,
+        cksum,
+    }))
 }
 
 impl Resume {
     /// The state before the first frame of the generation that `header` starts.
     fn start(header: &[u8], h: &Header) -> Self {
-        Self { header: header[..WAL_HEADER].try_into().unwrap(), offset: WAL_HEADER as u64, cksum: h.cksum, commits: 0 }
+        Self {
+            header: header[..WAL_HEADER].try_into().unwrap(),
+            offset: WAL_HEADER as u64,
+            cksum: h.cksum,
+            commits: 0,
+        }
     }
 
     pub fn salt(&self) -> (u32, u32) {
@@ -117,7 +127,10 @@ impl Resume {
     /// Text form stored in `meta.db`: `v1 <header hex> <offset> <cksum0> <cksum1> <commits>`.
     pub fn to_meta(&self) -> String {
         let hex: String = self.header.iter().map(|b| format!("{b:02x}")).collect();
-        format!("v1 {hex} {} {} {} {}", self.offset, self.cksum.0, self.cksum.1, self.commits)
+        format!(
+            "v1 {hex} {} {} {} {}",
+            self.offset, self.cksum.0, self.cksum.1, self.commits
+        )
     }
 
     /// Inverse of [`Resume::to_meta`]; `None` for anything else.
@@ -140,7 +153,12 @@ impl Resume {
         if it.next().is_some() {
             return None;
         }
-        Some(Self { header, offset, cksum, commits })
+        Some(Self {
+            header,
+            offset,
+            cksum,
+            commits,
+        })
     }
 
     /// True when this state is a commit boundary of the WAL whose first bytes are `header` and
@@ -197,7 +215,9 @@ fn checksum(big_endian: bool, data: &[u8], mut s0: u32, mut s1: u32) -> (u32, u3
 
 /// Returns `None` if the buffer holds no valid WAL header (empty / still being created).
 pub fn parse(buf: &[u8]) -> Result<Option<Wal<'_>>> {
-    let Some(h) = parse_header(buf)? else { return Ok(None) };
+    let Some(h) = parse_header(buf)? else {
+        return Ok(None);
+    };
     Ok(Some(scan(&h, &buf[WAL_HEADER..], Resume::start(buf, &h))))
 }
 
@@ -238,17 +258,28 @@ fn scan<'a>(h: &Header, frames: &'a [u8], from: Resume) -> Wal<'a> {
         (s0, s1) = (c0, c1);
         off += frame_len;
 
-        pending.push(Frame { pgno: be32(&fh[0..4]), page });
+        pending.push(Frame {
+            pgno: be32(&fh[0..4]),
+            page,
+        });
         let db_pages = be32(&fh[4..8]);
         if db_pages != 0 {
-            commits.push(Commit { frames: std::mem::take(&mut pending), db_pages });
+            commits.push(Commit {
+                frames: std::mem::take(&mut pending),
+                db_pages,
+            });
             end.offset = from.offset + off as u64;
             end.cksum = (s0, s1);
             end.commits += 1;
         }
     }
 
-    Wal { page_size: h.page_size, salt: h.salt, commits, end }
+    Wal {
+        page_size: h.page_size,
+        salt: h.salt,
+        commits,
+        end,
+    }
 }
 
 /// Reference WAL encoder.
@@ -269,7 +300,12 @@ pub mod encode {
     }
 
     /// Encode a valid WAL image. Every page must be `page_size` bytes.
-    pub fn encode(big_endian: bool, salt: (u32, u32), page_size: u32, commits: &[Commit]) -> Vec<u8> {
+    pub fn encode(
+        big_endian: bool,
+        salt: (u32, u32),
+        page_size: u32,
+        commits: &[Commit],
+    ) -> Vec<u8> {
         let mut out = Vec::new();
         put(&mut out, if big_endian { MAGIC_BE } else { MAGIC_LE });
         for v in [3007000, page_size, 0, salt.0, salt.1] {
@@ -312,12 +348,21 @@ mod tests {
     fn owned(w: &Wal) -> Owned {
         w.commits
             .iter()
-            .map(|c| (c.frames.iter().map(|f| (f.pgno, f.page.to_vec())).collect(), c.db_pages))
+            .map(|c| {
+                (
+                    c.frames.iter().map(|f| (f.pgno, f.page.to_vec())).collect(),
+                    c.db_pages,
+                )
+            })
             .collect()
     }
 
     fn parsed(buf: &[u8]) -> Owned {
-        parse(buf).ok().flatten().map(|w| owned(&w)).unwrap_or_default()
+        parse(buf)
+            .ok()
+            .flatten()
+            .map(|w| owned(&w))
+            .unwrap_or_default()
     }
 
     fn page() -> impl Strategy<Value = Vec<u8>> {
@@ -522,18 +567,27 @@ mod tests {
             let c: Owned = vec![one(1, 1, PS, 1), one(2, 2, PS, 2)];
             let buf = encode(be, (8, 9), &c);
             let empty = parse(&buf[..WAL_HEADER]).unwrap().unwrap();
-            assert_eq!((empty.end.offset, empty.end.commits), (WAL_HEADER as u64, 0));
+            assert_eq!(
+                (empty.end.offset, empty.end.commits),
+                (WAL_HEADER as u64, 0)
+            );
             assert_eq!(empty.end.tail_start(), WAL_HEADER as u64);
             assert_eq!(owned(&resume_on(&buf, &empty.end).unwrap()), c);
             // The header checksum is the chain seed: a state claiming another seed is refused.
-            let bad = Resume { cksum: (1, 1), ..empty.end };
+            let bad = Resume {
+                cksum: (1, 1),
+                ..empty.end
+            };
             assert!(resume_on(&buf, &bad).is_none());
         }
     }
 
     #[test]
     fn resume_meta_rejects_other_text() {
-        let r = parse(&encode(false, (1, 2), &vec![one(1, 1, PS, 1)])).unwrap().unwrap().end;
+        let r = parse(&encode(false, (1, 2), &vec![one(1, 1, PS, 1)]))
+            .unwrap()
+            .unwrap()
+            .end;
         let good = r.to_meta();
         assert_eq!(Resume::from_meta(&good), Some(r));
         for bad in [
@@ -553,7 +607,11 @@ mod tests {
     fn unfinished_transaction_is_ignored() {
         // Commit frame is what makes a transaction durable; frames after the last one do not count.
         let page = vec![1u8; PS];
-        let buf = encode(false, (1, 1), &vec![(vec![(1, page.clone()), (2, page)], 2)]);
+        let buf = encode(
+            false,
+            (1, 1),
+            &vec![(vec![(1, page.clone()), (2, page)], 2)],
+        );
         let first_frame_only = &buf[..WAL_HEADER + FRAME_HEADER + PS];
         assert!(parsed(first_frame_only).is_empty());
     }
@@ -661,7 +719,13 @@ mod tests {
             let c: Owned = vec![one(1, 1, PS, 1), one(2, 2, PS, 2)];
             let full = encode(be, (1, 2), &c);
             let frame_len = FRAME_HEADER + PS;
-            for keep in [1, FRAME_HEADER - 1, FRAME_HEADER, FRAME_HEADER + 100, frame_len - 1] {
+            for keep in [
+                1,
+                FRAME_HEADER - 1,
+                FRAME_HEADER,
+                FRAME_HEADER + 100,
+                frame_len - 1,
+            ] {
                 let buf = &full[..full.len() - frame_len + keep];
                 assert_eq!(parsed(buf), c[..1].to_vec(), "be={be} keep={keep}");
             }
@@ -673,7 +737,10 @@ mod tests {
         for be in [false, true] {
             let c: Owned = vec![
                 one(1, 1, PS, 1),
-                (vec![(2, vec![2; PS]), (3, vec![3; PS]), (4, vec![4; PS])], 4),
+                (
+                    vec![(2, vec![2; PS]), (3, vec![3; PS]), (4, vec![4; PS])],
+                    4,
+                ),
             ];
             let full = encode(be, (1, 2), &c);
             let frame_len = FRAME_HEADER + PS;
@@ -688,7 +755,10 @@ mod tests {
         for be in [false, true] {
             for ps in [512u32, 1024, 4096, 65536] {
                 let c: Owned = vec![
-                    (vec![(1, vec![0xa5; ps as usize]), (2, vec![0x5a; ps as usize])], 2),
+                    (
+                        vec![(1, vec![0xa5; ps as usize]), (2, vec![0x5a; ps as usize])],
+                        2,
+                    ),
                     one(1, 7, ps as usize, 2),
                 ];
                 let buf = enc(be, (11, 22), ps, &c);

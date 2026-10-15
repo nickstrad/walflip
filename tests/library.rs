@@ -39,7 +39,10 @@ fn external_vacuum(d: &Db, m: &mut Model) {
     let conn = Connection::open(&d.live).unwrap();
     conn.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
     conn.execute_batch("VACUUM").unwrap();
-    let added = Store::open(&d.meta).unwrap().capture(&d.wal_path(), "VACUUM").unwrap();
+    let added = Store::open(&d.meta)
+        .unwrap()
+        .capture(&d.wal_path(), "VACUUM")
+        .unwrap();
     assert_eq!(added, 1, "VACUUM should be exactly one new commit");
     m.exec_sum += 1;
     m.snapshots.push(Some(m.current())); // contents unchanged, one more commit
@@ -47,7 +50,10 @@ fn external_vacuum(d: &Db, m: &mut Model) {
 
 /// Bytes of `clone -n k`, written to a fresh file under `dir`.
 fn clone_bytes(d: &Db, k: u64, dir: &Path) -> Vec<u8> {
-    let out = dir.join(format!("clone-{k}-{}.db", fs::read_dir(dir).unwrap().count()));
+    let out = dir.join(format!(
+        "clone-{k}-{}.db",
+        fs::read_dir(dir).unwrap().count()
+    ));
     db::clone_at(d, k, &out).unwrap_or_else(|e| panic!("clone -n {k}: {e:#}"));
     fs::read(out).unwrap()
 }
@@ -94,7 +100,11 @@ fn s9a_exec_vacuum_is_one_shrinking_commit() {
     let d = create(&root, "vac", S9_SCHEMA);
     let mut m = Model::new(Some(S9_SCHEMA));
     for i in 0..4 {
-        exec(&d, &mut m, &format!("INSERT INTO t(body) VALUES (zeroblob({}))", 30000 + i));
+        exec(
+            &d,
+            &mut m,
+            &format!("INSERT INTO t(body) VALUES (zeroblob({}))", 30000 + i),
+        );
     }
     exec(&d, &mut m, "DELETE FROM t WHERE id > 1");
     let pages_before = Observed::of(&d).log.last().unwrap().db_pages;
@@ -104,12 +114,26 @@ fn s9a_exec_vacuum_is_one_shrinking_commit() {
     let s = o.commits;
     let last = o.log.last().unwrap();
     assert_eq!(last.sql, "VACUUM");
-    assert!(last.db_pages < pages_before, "INV-42: db_pages {pages_before} -> {}", last.db_pages);
+    assert!(
+        last.db_pages < pages_before,
+        "INV-42: db_pages {pages_before} -> {}",
+        last.db_pages
+    );
     let c_prev = clone_bytes(&d, s - 1, tmp.path());
     let c_s = clone_bytes(&d, s, tmp.path());
-    assert!(c_s.len() < c_prev.len(), "INV-42: clone({s}) !< clone({})", s - 1);
-    assert!(fs::metadata(d.wal_path()).is_err(), "WAL checkpointed away after exec");
-    assert!(c_s == fs::read(&d.live).unwrap(), "INV-31: clone(total) != live.db after exec VACUUM");
+    assert!(
+        c_s.len() < c_prev.len(),
+        "INV-42: clone({s}) !< clone({})",
+        s - 1
+    );
+    assert!(
+        fs::metadata(d.wal_path()).is_err(),
+        "WAL checkpointed away after exec"
+    );
+    assert!(
+        c_s == fs::read(&d.live).unwrap(),
+        "INV-31: clone(total) != live.db after exec VACUUM"
+    );
 
     // Lowercase, trailing `;`, and the explicit `main` schema take the same path.
     for sql in ["vacuum;", "VACUUM main", "  Vacuum \"main\" ;  "] {
@@ -118,7 +142,10 @@ fn s9a_exec_vacuum_is_one_shrinking_commit() {
     }
     exec(&d, &mut m, "INSERT INTO t(body) VALUES (zeroblob(40000))");
     let fin = assert_invariants(&root, "vac", Some(&m), Checks::full());
-    assert!(clone_bytes(&d, fin.commits, tmp.path()) == fs::read(&d.live).unwrap(), "INV-31 after growth");
+    assert!(
+        clone_bytes(&d, fin.commits, tmp.path()) == fs::read(&d.live).unwrap(),
+        "INV-31 after growth"
+    );
 }
 
 /// Q4: `VACUUM INTO` stays denied, in any spelling that reaches SQLite: nothing is committed, no
@@ -141,12 +168,22 @@ fn s9a_vacuum_into_is_denied_and_creates_no_file() {
     .enumerate()
     {
         let (obs, hashes) = (Observed::of(&d), FileHashes::of(&d.dir));
-        let err = format!("{:#}", db::exec(&d, &[sql.clone()]).expect_err("VACUUM INTO must fail"));
+        let err = format!(
+            "{:#}",
+            db::exec(&d, &[sql.clone()]).expect_err("VACUUM INTO must fail")
+        );
         if i < 2 {
-            assert!(err.contains("VACUUM INTO") && err.contains("not allowed"), "clear message: {err}");
+            assert!(
+                err.contains("VACUUM INTO") && err.contains("not allowed"),
+                "clear message: {err}"
+            );
         }
         assert!(!target.exists(), "VACUUM INTO created {t}: {sql}");
-        assert_eq!(Observed::of(&d), obs, "INV-37: status/log changed after: {sql}");
+        assert_eq!(
+            Observed::of(&d),
+            obs,
+            "INV-37: status/log changed after: {sql}"
+        );
         let after = FileHashes::of(&d.dir);
         for f in ["live.db", "base.db", "meta.db"] {
             assert_eq!(hashes.0[f], after.0[f], "INV-37: {f} changed after: {sql}");
@@ -165,8 +202,14 @@ fn s9a_vacuum_in_a_stdin_batch() {
     h.create("vb", S9_SCHEMA);
     let d = Db::existing(&h.root(), "vb").unwrap();
     let mut m = Model::new(Some(S9_SCHEMA));
-    let (a, b) = ("INSERT INTO t(body) VALUES (zeroblob(9000))", "DELETE FROM t WHERE id = 1");
-    let o = h.with_stdin(&["--db", "vb", "exec", "-"], &format!("{a}\n{a}\n{b}\nVACUUM\n{a}\n"));
+    let (a, b) = (
+        "INSERT INTO t(body) VALUES (zeroblob(9000))",
+        "DELETE FROM t WHERE id = 1",
+    );
+    let o = h.with_stdin(
+        &["--db", "vb", "exec", "-"],
+        &format!("{a}\n{a}\n{b}\nVACUUM\n{a}\n"),
+    );
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
     assert_eq!(parse_captured(&String::from_utf8(o.stdout).unwrap()), 5);
     m.exec(a, 1);
@@ -178,17 +221,32 @@ fn s9a_vacuum_in_a_stdin_batch() {
     assert_eq!(labels, [a, a, b, "VACUUM", a]);
     assert_invariants(&h.root(), "vb", Some(&m), Checks::full());
 
-    let o = h.with_stdin(&["--db", "vb", "exec", "-"], &format!("{a}\nVACUUM; DROP TABLE t\n{a}\n"));
+    let o = h.with_stdin(
+        &["--db", "vb", "exec", "-"],
+        &format!("{a}\nVACUUM; DROP TABLE t\n{a}\n"),
+    );
     assert!(!o.status.success());
     let err = String::from_utf8(o.stderr).unwrap();
-    assert!(err.contains("only a bare `VACUUM`") && err.contains("statement 2"), "{err}");
+    assert!(
+        err.contains("only a bare `VACUUM`") && err.contains("statement 2"),
+        "{err}"
+    );
     m.exec(a, 1);
     let o = assert_invariants(&h.root(), "vb", Some(&m), Checks::full());
-    assert_eq!(o.commits, 6, "line 1 committed, line 2 rejected, line 3 never ran");
+    assert_eq!(
+        o.commits, 6,
+        "line 1 committed, line 2 rejected, line 3 never ran"
+    );
     // The same text as one `exec` argument is one statement too, so it is rejected whole.
     let err = h.err(&["--db", "vb", "exec", "VACUUM; DROP TABLE t"]);
     assert!(err.contains("only a bare `VACUUM`"), "{err}");
-    assert_eq!(common::ints(&d.live, "SELECT count(*) FROM sqlite_master WHERE name = 't'"), [1]);
+    assert_eq!(
+        common::ints(
+            &d.live,
+            "SELECT count(*) FROM sqlite_master WHERE name = 't'"
+        ),
+        [1]
+    );
     assert_invariants(&h.root(), "vb", Some(&m), Checks::full());
 }
 
@@ -198,7 +256,11 @@ fn s9b_external_vacuum_shrink_is_captured_and_replayed() {
     let d = create(&root, "vac", S9_SCHEMA);
     let mut m = Model::new(Some(S9_SCHEMA));
     for i in 0..4 {
-        exec(&d, &mut m, &format!("INSERT INTO t(body) VALUES (zeroblob({}))", 30000 + i));
+        exec(
+            &d,
+            &mut m,
+            &format!("INSERT INTO t(body) VALUES (zeroblob({}))", 30000 + i),
+        );
     }
     // Free most pages; without auto_vacuum they stay in the freelist, so db_pages is unchanged.
     exec(&d, &mut m, "DELETE FROM t WHERE id > 1");
@@ -219,23 +281,42 @@ fn s9b_external_vacuum_shrink_is_captured_and_replayed() {
     let ps = page_size(&d) as u64;
     let c_prev = clone_bytes(&d, s - 1, tmp.path());
     let c_s = clone_bytes(&d, s, tmp.path());
-    assert!(c_s.len() < c_prev.len(), "INV-42: clone({s}) {} bytes !< clone({}) {} bytes", c_s.len(), s - 1, c_prev.len());
+    assert!(
+        c_s.len() < c_prev.len(),
+        "INV-42: clone({s}) {} bytes !< clone({}) {} bytes",
+        c_s.len(),
+        s - 1,
+        c_prev.len()
+    );
     assert_eq!(c_s.len() as u64, pages_vac * ps);
     assert_invariants(&root, "vac", Some(&m), Checks::full());
 
     // Later growth past the shrunken size replays correctly.
     for i in 0..3 {
-        exec(&d, &mut m, &format!("INSERT INTO t(body) VALUES (zeroblob({}))", 50000 + i));
+        exec(
+            &d,
+            &mut m,
+            &format!("INSERT INTO t(body) VALUES (zeroblob({}))", 50000 + i),
+        );
     }
     exec(&d, &mut m, "UPDATE t SET body = zeroblob(10) WHERE id = 1");
     let fin = assert_invariants(&root, "vac", Some(&m), Checks::full());
-    assert!(fin.log.last().unwrap().db_pages > pages_vac, "growth after the shrink");
+    assert!(
+        fin.log.last().unwrap().db_pages > pages_vac,
+        "growth after the shrink"
+    );
     let pages: Vec<u64> = fin.log.iter().map(|r| r.db_pages).collect();
     eprintln!("S9 db_pages per commit: {pages:?}");
 
     // Final clone == live bytes (INV-31; also inside assert_invariants, asserted here explicitly).
-    assert!(fs::metadata(d.wal_path()).is_err(), "WAL checkpointed away after the last exec");
-    assert!(clone_bytes(&d, fin.commits, tmp.path()) == fs::read(&d.live).unwrap(), "INV-31: final clone != live.db");
+    assert!(
+        fs::metadata(d.wal_path()).is_err(),
+        "WAL checkpointed away after the last exec"
+    );
+    assert!(
+        clone_bytes(&d, fin.commits, tmp.path()) == fs::read(&d.live).unwrap(),
+        "INV-31: final clone != live.db"
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -249,7 +330,9 @@ fn frames_between(d: &Db, from: u64, to: u64) -> Vec<(u32, Vec<u8>)> {
         .conn()
         .prepare("SELECT pgno, page FROM frames WHERE commit_idx BETWEEN ?1 AND ?2 ORDER BY commit_idx, seq")
         .unwrap();
-    let rows = st.query_map([from, to], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+    let rows = st
+        .query_map([from, to], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap();
     rows.collect::<Result<_, _>>().unwrap()
 }
 
@@ -259,7 +342,10 @@ const VACUUM_STEP: &str = "-- external VACUUM";
 fn s11_statements() -> Vec<String> {
     let mut v = Vec::new();
     for i in 0..12 {
-        v.push(format!("INSERT INTO kv(k, v) VALUES ('k{i}', zeroblob({}))", 100 + i * 700));
+        v.push(format!(
+            "INSERT INTO kv(k, v) VALUES ('k{i}', zeroblob({}))",
+            100 + i * 700
+        ));
     }
     v.push("CREATE INDEX kv_v ON kv(length(v))".into());
     for i in (0..12).step_by(3) {
@@ -273,7 +359,9 @@ fn s11_statements() -> Vec<String> {
     }
     v.push("DROP INDEX kv_v".into());
     for i in 0..6 {
-        v.push(format!("INSERT INTO kv(k, v) VALUES ('n{i}', zeroblob(3000))"));
+        v.push(format!(
+            "INSERT INTO kv(k, v) VALUES ('n{i}', zeroblob(3000))"
+        ));
     }
     v
 }
@@ -298,12 +386,20 @@ fn s11_clone_chain() {
     let total = o.commits;
     let ps = o.page_size as usize;
     let pages: Vec<u64> = o.log.iter().map(|r| r.db_pages).collect();
-    assert!(pages.windows(2).any(|w| w[1] < w[0]), "S11 should include a shrinking commit: {pages:?}");
+    assert!(
+        pages.windows(2).any(|w| w[1] < w[0]),
+        "S11 should include a shrinking commit: {pages:?}"
+    );
 
-    let clones: Vec<Vec<u8>> = (0..=total).map(|k| clone_bytes(&d, k, tmp.path())).collect();
+    let clones: Vec<Vec<u8>> = (0..=total)
+        .map(|k| clone_bytes(&d, k, tmp.path()))
+        .collect();
     // INV-31: with the WAL checkpointed, clone(total) is live.db byte for byte.
     assert!(fs::metadata(d.wal_path()).is_err());
-    assert!(clones[total as usize] == fs::read(&d.live).unwrap(), "INV-31: clone({total}) != live.db");
+    assert!(
+        clones[total as usize] == fs::read(&d.live).unwrap(),
+        "INV-31: clone({total}) != live.db"
+    );
 
     // INV-32 for every pair n < m (31 commits -> 496 pairs; dbs are small).
     let mut failures = Vec::new();
@@ -312,14 +408,23 @@ fn s11_clone_chain() {
             let frames = frames_between(&d, n + 1, mm);
             let db_pages = pages[mm as usize - 1] as u32;
             let mut img = clones[n as usize].clone();
-            replay::apply(&mut img, ps, frames.iter().map(|(p, b)| (*p, b.as_slice())), Some(db_pages), u32::MAX)
-                .unwrap();
+            replay::apply(
+                &mut img,
+                ps,
+                frames.iter().map(|(p, b)| (*p, b.as_slice())),
+                Some(db_pages),
+                u32::MAX,
+            )
+            .unwrap();
             if img != clones[mm as usize] {
                 failures.push((n, mm));
             }
         }
     }
-    assert!(failures.is_empty(), "INV-32: chain != direct clone for (n, m) pairs {failures:?}");
+    assert!(
+        failures.is_empty(),
+        "INV-32: chain != direct clone for (n, m) pairs {failures:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -330,12 +435,18 @@ fn s11_clone_chain() {
 fn wal_cursor(d: &Db) -> (String, String) {
     let bytes = fs::read(d.wal_path()).expect("WAL is pinned by the reader");
     let w = wal::parse(&bytes).unwrap().expect("WAL has a valid header");
-    (format!("{}:{}", w.salt.0, w.salt.1), w.commits.len().to_string())
+    (
+        format!("{}:{}", w.salt.0, w.salt.1),
+        w.commits.len().to_string(),
+    )
 }
 
 fn stored_cursor(d: &Db) -> (String, String) {
     let s = Store::open(&d.meta).unwrap();
-    (s.get("cursor_salt").unwrap().unwrap(), s.get("cursor_commits").unwrap().unwrap())
+    (
+        s.get("cursor_salt").unwrap().unwrap(),
+        s.get("cursor_commits").unwrap().unwrap(),
+    )
 }
 
 /// A connection holding an open read transaction on live.db, which stops exec's connection
@@ -343,7 +454,9 @@ fn stored_cursor(d: &Db) -> (String, String) {
 fn reader(d: &Db) -> Connection {
     let c = Connection::open(&d.live).unwrap();
     c.execute_batch("BEGIN").unwrap();
-    let _: i64 = c.query_row("SELECT count(*) FROM t", [], |r| r.get(0)).unwrap();
+    let _: i64 = c
+        .query_row("SELECT count(*) FROM t", [], |r| r.get(0))
+        .unwrap();
     c
 }
 
@@ -362,19 +475,28 @@ fn inv23_cursor_matches_wal_while_reader_pins_it() {
         assert_eq!(n, (i + 1).to_string(), "WAL keeps growing while pinned");
         assert_eq!(stored_cursor(&d), (salt, n), "INV-23 after exec {i}");
     }
-    let batch = vec!["INSERT INTO t(v) VALUES ('b1')".to_string(), "UPDATE t SET v = 'b2' WHERE id = 1".to_string()];
+    let batch = vec![
+        "INSERT INTO t(v) VALUES ('b1')".to_string(),
+        "UPDATE t SET v = 'b2' WHERE id = 1".to_string(),
+    ];
     let got = db::exec(&d, &batch).unwrap() as u64;
     m.exec_batch(&batch, got);
     assert_eq!(stored_cursor(&d), wal_cursor(&d), "INV-23 after a batch");
     assert_eq!(stored_cursor(&d).1, "6");
     let gen1_salt = stored_cursor(&d).0;
-    assert!(Observed::of(&d).wal_bytes.is_some(), "INV-48: WAL still present while the reader is open");
+    assert!(
+        Observed::of(&d).wal_bytes.is_some(),
+        "INV-48: WAL still present while the reader is open"
+    );
     assert_invariants(&root, "cur", Some(&m), Checks::full());
 
     // Releasing the reader closes the last connection, which checkpoints and deletes the WAL.
     // The stored cursor still names generation 1 until the next capture.
     drop(r);
-    assert!(Observed::of(&d).wal_bytes.is_none(), "INV-48: WAL cleared once nobody pins it");
+    assert!(
+        Observed::of(&d).wal_bytes.is_none(),
+        "INV-48: WAL cleared once nobody pins it"
+    );
     assert_eq!(stored_cursor(&d), (gen1_salt.clone(), "6".to_string()));
     assert_invariants(&root, "cur", Some(&m), Checks::full());
 
@@ -382,15 +504,26 @@ fn inv23_cursor_matches_wal_while_reader_pins_it() {
     let r = reader(&d);
     exec(&d, &mut m, "INSERT INTO t(v) VALUES ('c')");
     let (salt2, n2) = wal_cursor(&d);
-    assert_eq!(stored_cursor(&d), (salt2.clone(), n2.clone()), "INV-23 in a new generation");
+    assert_eq!(
+        stored_cursor(&d),
+        (salt2.clone(), n2.clone()),
+        "INV-23 in a new generation"
+    );
     assert_eq!(n2, "1");
     assert_ne!(salt2, gen1_salt, "a fresh WAL has a fresh salt");
     exec(&d, &mut m, "INSERT INTO t(v) VALUES ('d')");
-    assert_eq!(stored_cursor(&d), (salt2, "2".to_string()), "INV-23 after the second exec of gen 2");
+    assert_eq!(
+        stored_cursor(&d),
+        (salt2, "2".to_string()),
+        "INV-23 after the second exec of gen 2"
+    );
     drop(r);
 
     let o = assert_invariants(&root, "cur", Some(&m), Checks::full());
-    assert_eq!(o.commits, 8, "no duplicated or lost commits across generations");
+    assert_eq!(
+        o.commits, 8,
+        "no duplicated or lost commits across generations"
+    );
 }
 
 /// INV-10 / Q6: sector-padding duplicate commit frames. A foreign writer with `POWERSAFE_OVERWRITE`
@@ -401,16 +534,24 @@ fn inv23_cursor_matches_wal_while_reader_pins_it() {
 #[test]
 fn inv10_sector_padding_frames_are_counted_as_recovered_commits() {
     let (_tmp, root) = root_and_tmp();
-    let d = create(&root, "pad", "CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT)");
+    let d = create(
+        &root,
+        "pad",
+        "CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT)",
+    );
     let base = Store::open(&d.meta).unwrap().commit_count().unwrap();
 
     let uri = format!("file:{}?psow=0", d.live.display());
     let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_URI;
     let foreign = Connection::open_with_flags(&uri, flags).unwrap();
-    foreign.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
+    foreign
+        .pragma_update(None, "wal_autocheckpoint", 0)
+        .unwrap();
     foreign.pragma_update(None, "synchronous", "FULL").unwrap();
     for i in 0..3 {
-        foreign.execute("INSERT INTO t(v) VALUES (?1)", [format!("row{i}")]).unwrap();
+        foreign
+            .execute("INSERT INTO t(v) VALUES (?1)", [format!("row{i}")])
+            .unwrap();
     }
     // Count real frames in the WAL, independent of walflip's capture.
     let wal_bytes = fs::read(d.wal_path()).unwrap();
@@ -422,12 +563,25 @@ fn inv10_sector_padding_frames_are_counted_as_recovered_commits() {
     }
 
     // A no-op statement: exec's recovery step captures what the foreign writer left in the WAL.
-    let report =
-        db::exec_with(&d, &["UPDATE t SET v = v WHERE 0".to_string()], std::time::Duration::from_secs(5)).unwrap();
+    let report = db::exec_with(
+        &d,
+        &["UPDATE t SET v = v WHERE 0".to_string()],
+        std::time::Duration::from_secs(5),
+    )
+    .unwrap();
     let new_commits = Store::open(&d.meta).unwrap().commit_count().unwrap() - base;
-    eprintln!("inv10: {frames} WAL frames, {new_commits} commits captured, {} recovered", report.recovered);
-    assert!(new_commits > 3, "padding should inflate 3 inserts to more than 3 commits, got {new_commits}");
-    assert_eq!(report.recovered as u64, new_commits, "every extra commit is labelled (recovered)");
+    eprintln!(
+        "inv10: {frames} WAL frames, {new_commits} commits captured, {} recovered",
+        report.recovered
+    );
+    assert!(
+        new_commits > 3,
+        "padding should inflate 3 inserts to more than 3 commits, got {new_commits}"
+    );
+    assert_eq!(
+        report.recovered as u64, new_commits,
+        "every extra commit is labelled (recovered)"
+    );
     assert_eq!(report.captured as u64, new_commits);
     let log = db::log(&d, 1000, false).unwrap();
     let recovered = log.iter().filter(|e| e.sql == db::RECOVERED_LABEL).count() as u64;
@@ -437,10 +591,18 @@ fn inv10_sector_padding_frames_are_counted_as_recovered_commits() {
     drop(foreign); // checkpoints and removes the WAL
     let out = root.join("pad-clone.db");
     db::clone_at(&d, total, &out).unwrap();
-    assert_eq!(fs::read(&out).unwrap(), fs::read(&d.live).unwrap(), "clone(total) == live bytes");
+    assert_eq!(
+        fs::read(&out).unwrap(),
+        fs::read(&d.live).unwrap(),
+        "clone(total) == live bytes"
+    );
     let c = Connection::open(&d.live).unwrap();
-    let ok: String = c.query_row("PRAGMA integrity_check", [], |r| r.get(0)).unwrap();
+    let ok: String = c
+        .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+        .unwrap();
     assert_eq!(ok, "ok");
-    let n: i64 = c.query_row("SELECT count(*) FROM t", [], |r| r.get(0)).unwrap();
+    let n: i64 = c
+        .query_row("SELECT count(*) FROM t", [], |r| r.get(0))
+        .unwrap();
     assert_eq!(n, 3);
 }

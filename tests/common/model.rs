@@ -38,10 +38,14 @@ fn render(v: ValueRef<'_>) -> String {
 /// `WITHOUT ROWID` tables alike).
 pub fn table_rows(conn: &Connection, table: &str) -> Vec<Vec<String>> {
     let sql = format!("SELECT * FROM {}", quote_ident(table));
-    let mut st = conn.prepare(&sql).unwrap_or_else(|e| panic!("dump {table}: {e}"));
+    let mut st = conn
+        .prepare(&sql)
+        .unwrap_or_else(|e| panic!("dump {table}: {e}"));
     let ncol = st.column_count();
     let mut rows: Vec<Vec<String>> = st
-        .query_map([], |r| (0..ncol).map(|i| r.get_ref(i).map(render)).collect())
+        .query_map([], |r| {
+            (0..ncol).map(|i| r.get_ref(i).map(render)).collect()
+        })
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
@@ -96,7 +100,8 @@ impl TableDump {
 
     /// Human-readable first difference, for assertion messages.
     pub fn diff(&self, other: &Self) -> String {
-        let keys: std::collections::BTreeSet<&String> = self.0.keys().chain(other.0.keys()).collect();
+        let keys: std::collections::BTreeSet<&String> =
+            self.0.keys().chain(other.0.keys()).collect();
         for k in keys {
             match (self.0.get(k), other.0.get(k)) {
                 (Some(a), Some(b)) if a == b => continue,
@@ -119,10 +124,16 @@ impl Model {
     pub fn new(schema: Option<&str>) -> Self {
         let shadow = Connection::open_in_memory().unwrap();
         if let Some(sql) = schema {
-            shadow.execute_batch(sql).expect("model: schema failed in the shadow db");
+            shadow
+                .execute_batch(sql)
+                .expect("model: schema failed in the shadow db");
         }
         let snap = TableDump::of_conn(&shadow);
-        Self { shadow, snapshots: vec![Some(snap)], exec_sum: 0 }
+        Self {
+            shadow,
+            snapshots: vec![Some(snap)],
+            exec_sum: 0,
+        }
     }
 
     pub fn current(&self) -> TableDump {
@@ -136,8 +147,9 @@ impl Model {
 
     fn run(&self, stmt: &str) {
         let tx = self.shadow.unchecked_transaction().unwrap();
-        tx.execute_batch(stmt)
-            .unwrap_or_else(|e| panic!("model: statement succeeded on walflip but failed in shadow: {stmt}: {e}"));
+        tx.execute_batch(stmt).unwrap_or_else(|e| {
+            panic!("model: statement succeeded on walflip but failed in shadow: {stmt}: {e}")
+        });
         tx.commit().unwrap();
     }
 
@@ -147,7 +159,10 @@ impl Model {
         let before = self.current();
         self.run(stmt);
         let after = self.current();
-        assert!(captured <= 1, "INV-38: one statement produced {captured} commits: {stmt}");
+        assert!(
+            captured <= 1,
+            "INV-38: one statement produced {captured} commits: {stmt}"
+        );
         if captured == 0 {
             assert_eq!(
                 before, after,

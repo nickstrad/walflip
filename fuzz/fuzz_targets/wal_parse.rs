@@ -6,7 +6,9 @@ use libfuzzer_sys::fuzz_target;
 use walflip::wal;
 
 fuzz_target!(|data: &[u8]| {
-    let Ok(Some(w)) = wal::parse(data) else { return };
+    let Ok(Some(w)) = wal::parse(data) else {
+        return;
+    };
     let page = w.page_size as usize;
     assert!(page >= 512 && w.page_size.is_power_of_two());
     let mut frames = 0;

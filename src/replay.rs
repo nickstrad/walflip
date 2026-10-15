@@ -25,7 +25,10 @@ pub fn apply<'a>(
             bail!("frame page number {pgno} exceeds the maximum of {max_pages} pages");
         }
         if page.len() != page_size {
-            bail!("frame for page {pgno} is {} bytes, expected {page_size}", page.len());
+            bail!(
+                "frame for page {pgno} is {} bytes, expected {page_size}",
+                page.len()
+            );
         }
     }
     if let Some(pages) = db_pages {
@@ -141,7 +144,14 @@ mod tests {
         let cap = img.capacity();
         let start = std::time::Instant::now();
         assert!(apply(&mut img, PS, [(u32::MAX, &[0u8; PS][..])], None, 100).is_err());
-        assert!(apply(&mut img, PS, [(u32::MAX, &[0u8; PS][..])], Some(u32::MAX), 100).is_err());
+        assert!(apply(
+            &mut img,
+            PS,
+            [(u32::MAX, &[0u8; PS][..])],
+            Some(u32::MAX),
+            100
+        )
+        .is_err());
         assert!(start.elapsed() < std::time::Duration::from_millis(50));
         assert_eq!(img, vec![7u8; PS]);
         assert_eq!(img.capacity(), cap);

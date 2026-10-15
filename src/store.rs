@@ -22,7 +22,10 @@ CREATE TABLE IF NOT EXISTS frames(
 );";
 
 fn set_meta(conn: &Connection, key: &str, value: &str) -> Result<()> {
-    conn.execute("INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)", [key, value])?;
+    conn.execute(
+        "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)",
+        [key, value],
+    )?;
     Ok(())
 }
 
@@ -148,7 +151,9 @@ fn with_unseen<T>(
     f: impl FnOnce(Option<(&wal::Wal<'_>, usize)>, WalMark) -> Result<T>,
 ) -> Result<T> {
     let resume = cursor.resume();
-    let Some(mut view) = WalView::read(path, resume.as_ref())? else { return f(None, None) };
+    let Some(mut view) = WalView::read(path, resume.as_ref())? else {
+        return f(None, None);
+    };
     if let Some(r) = resume.as_ref().filter(|_| view.base > 0) {
         if let Some(w) = wal::parse_from(&view.header, &view.body, r) {
             return f(Some((&w, 0)), view.mark());
@@ -204,7 +209,10 @@ impl Store {
     /// read paths (`list`, `status`, `log`, `clone`), which must not write into the folder.
     pub fn open_existing(path: &Path) -> Result<Self> {
         if !path.is_file() {
-            anyhow::bail!("{} does not exist (no captured history here)", path.display());
+            anyhow::bail!(
+                "{} does not exist (no captured history here)",
+                path.display()
+            );
         }
         let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
             | rusqlite::OpenFlags::SQLITE_OPEN_URI
@@ -231,14 +239,18 @@ impl Store {
     }
 
     pub fn commit_count(&self) -> Result<u64> {
-        Ok(self.conn.query_row("SELECT count(*) FROM commits", [], |r| r.get(0))?)
+        Ok(self
+            .conn
+            .query_row("SELECT count(*) FROM commits", [], |r| r.get(0))?)
     }
 
     /// Commits in the WAL at `wal_path` that are not stored yet (0 when there is no WAL or it does
     /// not parse). Read-only and unlocked, so only a hint while writers are running.
     pub fn uncaptured(&self, wal_path: &Path) -> Result<u64> {
         let cursor = Cursor::load(&self.conn)?;
-        let r = with_unseen(wal_path, &cursor, |w, _| Ok(w.map_or(0, |(w, seen)| w.commits.len().saturating_sub(seen))));
+        let r = with_unseen(wal_path, &cursor, |w, _| {
+            Ok(w.map_or(0, |(w, seen)| w.commits.len().saturating_sub(seen)))
+        });
         // A WAL that cannot be read or parsed counts as nothing uncaptured (a hint only).
         Ok(r.unwrap_or(0) as u64)
     }
@@ -249,7 +261,10 @@ impl Store {
     /// unfinished transaction is rolled back from its journal by the next opener.
     pub fn lock(&mut self) -> Result<WriteLock<'_>> {
         self.conn.execute_batch("BEGIN IMMEDIATE")?;
-        Ok(WriteLock { conn: &self.conn, done: false })
+        Ok(WriteLock {
+            conn: &self.conn,
+            done: false,
+        })
     }
 
     /// Copy any commits in the live WAL we have not stored yet. Idempotent: re-reading the
@@ -308,7 +323,9 @@ impl Drop for WriteLock<'_> {
 }
 
 fn get_meta(conn: &Connection, key: &str) -> Result<Option<String>> {
-    Ok(conn.query_row("SELECT value FROM meta WHERE key=?1", [key], |r| r.get(0)).optional()?)
+    Ok(conn
+        .query_row("SELECT value FROM meta WHERE key=?1", [key], |r| r.get(0))
+        .optional()?)
 }
 
 fn capture_in_savepoint(conn: &Connection, wal_path: &Path, label: &str) -> Result<Captured> {
@@ -329,20 +346,33 @@ fn capture_in_savepoint(conn: &Connection, wal_path: &Path, label: &str) -> Resu
 fn capture_rows(conn: &Connection, wal_path: &Path, label: &str) -> Result<Captured> {
     let cursor = Cursor::load(conn)?;
     with_unseen(wal_path, &cursor, |parsed, mark| {
-        let Some((wal, seen)) = parsed else { return Ok(Captured { added: 0, mark }) };
+        let Some((wal, seen)) = parsed else {
+            return Ok(Captured { added: 0, mark });
+        };
         let added = store_commits(conn, &cursor, wal, seen, label)?;
         Ok(Captured { added, mark })
     })
 }
 
 /// Store `wal.commits[seen..]` and advance the cursor to `wal.end`. Returns the number added.
-fn store_commits(conn: &Connection, cursor: &Cursor, wal: &wal::Wal<'_>, seen: usize, label: &str) -> Result<usize> {
+fn store_commits(
+    conn: &Connection,
+    cursor: &Cursor,
+    wal: &wal::Wal<'_>,
+    seen: usize,
+    label: &str,
+) -> Result<usize> {
     // Clone writes pages at (pgno-1)*page_size using the size saved at create; a different
     // size in the WAL would make replayed frames land at the wrong offsets.
-    let stored_ps: Option<u64> = get_meta(conn, "page_size")?.map(|v| v.parse()).transpose()?;
+    let stored_ps: Option<u64> = get_meta(conn, "page_size")?
+        .map(|v| v.parse())
+        .transpose()?;
     if let Some(stored) = stored_ps {
         if stored != u64::from(wal.page_size) {
-            bail!("WAL page size {} does not match base snapshot page size {stored}", wal.page_size);
+            bail!(
+                "WAL page size {} does not match base snapshot page size {stored}",
+                wal.page_size
+            );
         }
     }
 
@@ -355,7 +385,9 @@ fn store_commits(conn: &Connection, cursor: &Cursor, wal: &wal::Wal<'_>, seen: u
     }
     // History idx is contiguous from 1, so max+1 is the next one (and, unlike count(*), costs
     // O(log n) instead of a scan of the table).
-    let first_idx = conn.query_row("SELECT coalesce(max(idx), 0) FROM commits", [], |r| r.get::<_, u64>(0))? + 1;
+    let first_idx = conn.query_row("SELECT coalesce(max(idx), 0) FROM commits", [], |r| {
+        r.get::<_, u64>(0)
+    })? + 1;
     for (idx, commit) in (first_idx..).zip(wal.commits.iter().skip(seen)) {
         conn.execute(
             "INSERT INTO commits(idx,label,db_pages) VALUES(?1,?2,?3)",
@@ -383,7 +415,11 @@ mod tests {
     fn cursor_cases() {
         assert_eq!(commits_seen(None, None, (1, 2)), 0);
         assert_eq!(commits_seen(Some("1:2"), Some("5"), (1, 2)), 5);
-        assert_eq!(commits_seen(Some("1:2"), Some("5"), (1, 3)), 0, "new salt restarts the count");
+        assert_eq!(
+            commits_seen(Some("1:2"), Some("5"), (1, 3)),
+            0,
+            "new salt restarts the count"
+        );
         assert_eq!(commits_seen(Some("1:2"), Some("junk"), (1, 2)), 0);
         assert_eq!(commits_seen(Some("1:2"), None, (1, 2)), 0);
     }
@@ -449,7 +485,10 @@ mod tests {
         (0..n)
             .map(|i| {
                 let b = i as u8 + 1;
-                (vec![(1, page(b)), (2 + i as u32, page(b.wrapping_add(100)))], 2 + i as u32)
+                (
+                    vec![(1, page(b)), (2 + i as u32, page(b.wrapping_add(100)))],
+                    2 + i as u32,
+                )
             })
             .collect()
     }
@@ -526,7 +565,10 @@ mod tests {
         write_wal(&wal, (1, 2), PS as u32, &c[..1]);
         assert_eq!(s.capture(&wal, "a").unwrap(), 1);
         let before = rows(&s);
-        let meta_before = (s.get("cursor_salt").unwrap(), s.get("cursor_commits").unwrap());
+        let meta_before = (
+            s.get("cursor_salt").unwrap(),
+            s.get("cursor_commits").unwrap(),
+        );
         // Make the final cursor write fail, after commits/frames were inserted in the tx.
         s.conn()
             .execute_batch(
@@ -539,9 +581,17 @@ mod tests {
         write_wal(&wal, (1, 2), PS as u32, &c);
         assert!(s.capture(&wal, "b").is_err());
         assert_eq!(rows(&s), before);
-        assert_eq!((s.get("cursor_salt").unwrap(), s.get("cursor_commits").unwrap()), meta_before);
+        assert_eq!(
+            (
+                s.get("cursor_salt").unwrap(),
+                s.get("cursor_commits").unwrap()
+            ),
+            meta_before
+        );
         // Once the fault is gone the same capture succeeds and adds the missing commits.
-        s.conn().execute_batch("DROP TRIGGER boom; DROP TRIGGER boom2;").unwrap();
+        s.conn()
+            .execute_batch("DROP TRIGGER boom; DROP TRIGGER boom2;")
+            .unwrap();
         assert_eq!(s.capture(&wal, "b").unwrap(), 2);
         assert_eq!(rows(&s), expected(&c));
     }
@@ -583,7 +633,8 @@ mod tests {
     #[test]
     fn inv26_capture_fails_busy_without_side_effects() {
         let (d, _s, wal) = setup();
-        let mut s = Store::open_with_timeout(&d.path().join("meta.db"), Duration::from_millis(50)).unwrap();
+        let mut s =
+            Store::open_with_timeout(&d.path().join("meta.db"), Duration::from_millis(50)).unwrap();
         write_wal(&wal, (1, 2), PS as u32, &sample(2));
         let other = Connection::open(d.path().join("meta.db")).unwrap();
         other.execute_batch("BEGIN IMMEDIATE").unwrap();
@@ -613,11 +664,15 @@ mod tests {
     // ---- T24: incremental capture (INV-51) ----
 
     fn resume_of(s: &Store) -> wal::Resume {
-        wal::Resume::from_meta(&s.get(CURSOR_RESUME).unwrap().expect("resume state stored")).unwrap()
+        wal::Resume::from_meta(&s.get(CURSOR_RESUME).unwrap().expect("resume state stored"))
+            .unwrap()
     }
 
     fn cursor_of(s: &Store) -> (Option<String>, Option<String>) {
-        (s.get("cursor_salt").unwrap(), s.get("cursor_commits").unwrap())
+        (
+            s.get("cursor_salt").unwrap(),
+            s.get("cursor_commits").unwrap(),
+        )
     }
 
     /// After a capture only the tail is read: damage inside the already captured frames (which a
@@ -657,9 +712,15 @@ mod tests {
             lock.capture(&wal, "old").unwrap();
             lock.commit().unwrap();
         }
-        s.conn().execute_batch("DELETE FROM frames WHERE commit_idx=3; DELETE FROM commits WHERE idx=3;").unwrap();
+        s.conn()
+            .execute_batch(
+                "DELETE FROM frames WHERE commit_idx=3; DELETE FROM commits WHERE idx=3;",
+            )
+            .unwrap();
         s.set("cursor_commits", "2").unwrap();
-        s.conn().execute("DELETE FROM meta WHERE key=?1", [CURSOR_RESUME]).unwrap();
+        s.conn()
+            .execute("DELETE FROM meta WHERE key=?1", [CURSOR_RESUME])
+            .unwrap();
 
         assert_eq!(s.uncaptured(&wal).unwrap(), 1);
         assert_eq!(s.capture(&wal, "new").unwrap(), 1);
@@ -668,7 +729,11 @@ mod tests {
         let meta = d.path().join("meta.db");
         let before = fs::read(&meta).unwrap();
         assert_eq!(s.capture(&wal, "new").unwrap(), 0);
-        assert_eq!(fs::read(&meta).unwrap(), before, "migrated cursor: a no-op capture writes nothing");
+        assert_eq!(
+            fs::read(&meta).unwrap(),
+            before,
+            "migrated cursor: a no-op capture writes nothing"
+        );
     }
 
     /// A resume state that disagrees with the count cursor (an older walflip advanced the count
@@ -685,22 +750,42 @@ mod tests {
                 // An older binary captured commit 3 and moved only the count.
                 "stale" => {
                     let lock = s.lock().unwrap();
-                    lock.conn.execute("INSERT INTO commits(idx,label,db_pages) VALUES(3,'old',?1)", [c[2].1]).unwrap();
+                    lock.conn
+                        .execute(
+                            "INSERT INTO commits(idx,label,db_pages) VALUES(3,'old',?1)",
+                            [c[2].1],
+                        )
+                        .unwrap();
                     for (seq, (pgno, p)) in c[2].0.iter().enumerate() {
                         lock.conn
-                            .execute("INSERT INTO frames VALUES(3,?1,?2,?3)", params![seq, pgno, p])
+                            .execute(
+                                "INSERT INTO frames VALUES(3,?1,?2,?3)",
+                                params![seq, pgno, p],
+                            )
                             .unwrap();
                     }
-                    lock.conn.execute("UPDATE meta SET value='3' WHERE key='cursor_commits'", []).unwrap();
+                    lock.conn
+                        .execute("UPDATE meta SET value='3' WHERE key='cursor_commits'", [])
+                        .unwrap();
                     lock.commit().unwrap();
                 }
                 "junk" => s.set(CURSOR_RESUME, "v1 not a state").unwrap(),
                 _ => s.set("cursor_salt", "9:9").unwrap(),
             }
-            let want = match damage { "stale" => 2, "junk" => 3, _ => 5 };
+            let want = match damage {
+                "stale" => 2,
+                "junk" => 3,
+                _ => 5,
+            };
             assert_eq!(s.uncaptured(&wal).unwrap(), want as u64, "{damage}");
             assert_eq!(s.capture(&wal, "b").unwrap(), want, "{damage}");
-            assert_eq!(resume_of(&s), wal::parse(&encode(false, (1, 2), PS as u32, &c)).unwrap().unwrap().end);
+            assert_eq!(
+                resume_of(&s),
+                wal::parse(&encode(false, (1, 2), PS as u32, &c))
+                    .unwrap()
+                    .unwrap()
+                    .end
+            );
             if damage != "other-salt" {
                 assert_eq!(rows(&s), expected(&c), "{damage}");
             }
@@ -723,10 +808,20 @@ mod tests {
         assert_eq!(resume_of(&s).commits, 1);
         // Same length at the state, other content at its last commit frame: the checksum there
         // differs, so the full parse runs and the count (1) decides.
-        let other: Vec<EC> = vec![c[0].clone(), (vec![(7, page(0x77))], 7), (vec![(8, page(0x88))], 8)];
+        let other: Vec<EC> = vec![
+            c[0].clone(),
+            (vec![(7, page(0x77))], 7),
+            (vec![(8, page(0x88))], 8),
+        ];
         write_wal(&wal, (1, 2), PS as u32, &other);
         assert_eq!(s.capture(&wal, "c").unwrap(), 2);
-        assert_eq!(resume_of(&s), wal::parse(&encode(false, (1, 2), PS as u32, &other)).unwrap().unwrap().end);
+        assert_eq!(
+            resume_of(&s),
+            wal::parse(&encode(false, (1, 2), PS as u32, &other))
+                .unwrap()
+                .unwrap()
+                .end
+        );
     }
 
     /// One step of the differential below.
@@ -816,15 +911,24 @@ mod tests {
     fn frame_order_within_commit_is_preserved() {
         let (_d, mut s, wal) = setup();
         let c: Vec<EC> = vec![(
-            vec![(5, page(1)), (2, page(2)), (5, page(3)), (1, page(4)), (9, page(5))],
+            vec![
+                (5, page(1)),
+                (2, page(2)),
+                (5, page(3)),
+                (1, page(4)),
+                (9, page(5)),
+            ],
             9,
         )];
         write_wal(&wal, (1, 1), PS as u32, &c);
         s.capture(&wal, "o").unwrap();
         let (_, f) = rows(&s);
         let got: Vec<(i64, Vec<u8>)> = f.into_iter().map(|(_, _, pg, p)| (pg, p)).collect();
-        let want: Vec<(i64, Vec<u8>)> =
-            c[0].0.iter().map(|(pg, p)| (i64::from(*pg), p.clone())).collect();
+        let want: Vec<(i64, Vec<u8>)> = c[0]
+            .0
+            .iter()
+            .map(|(pg, p)| (i64::from(*pg), p.clone()))
+            .collect();
         assert_eq!(got, want);
     }
 

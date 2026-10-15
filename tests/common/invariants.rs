@@ -29,11 +29,22 @@ pub fn hash_file(path: &Path) -> Option<u64> {
 pub struct FileHashes(pub BTreeMap<&'static str, Option<u64>>);
 
 impl FileHashes {
-    pub const FILES: [&'static str; 6] =
-        ["live.db", "live.db-wal", "live.db-shm", "base.db", "meta.db", "meta.db-journal"];
+    pub const FILES: [&'static str; 6] = [
+        "live.db",
+        "live.db-wal",
+        "live.db-shm",
+        "base.db",
+        "meta.db",
+        "meta.db-journal",
+    ];
 
     pub fn of(dir: &Path) -> Self {
-        Self(Self::FILES.iter().map(|f| (*f, hash_file(&dir.join(f)))).collect())
+        Self(
+            Self::FILES
+                .iter()
+                .map(|f| (*f, hash_file(&dir.join(f))))
+                .collect(),
+        )
     }
 }
 
@@ -61,7 +72,12 @@ impl Observed {
         let log = db::log(d, u64::MAX >> 1, false)
             .expect("log")
             .into_iter()
-            .map(|e| LogRow { n: e.n, frames: e.frames, db_pages: e.db_pages, sql: e.sql })
+            .map(|e| LogRow {
+                n: e.n,
+                frames: e.frames,
+                db_pages: e.db_pages,
+                sql: e.sql,
+            })
             .collect();
         Self {
             commits: s.commits,
@@ -92,12 +108,22 @@ pub struct Checks {
 
 impl Checks {
     pub fn full() -> Self {
-        Self { meta_structure: true, clone_every_k: true, model: true, live_oracle: true, hashes: true, list: true }
+        Self {
+            meta_structure: true,
+            clone_every_k: true,
+            model: true,
+            live_oracle: true,
+            hashes: true,
+            list: true,
+        }
     }
 
     /// Same checks, but clones only a sample of commits (for long histories, plan Q12).
     pub fn light() -> Self {
-        Self { clone_every_k: false, ..Self::full() }
+        Self {
+            clone_every_k: false,
+            ..Self::full()
+        }
     }
 }
 
@@ -130,7 +156,9 @@ fn sidecar(path: &Path, suffix: &str) -> PathBuf {
 }
 
 fn meta_i64(meta: &Path, sql: &str) -> i64 {
-    open_ro(meta).query_row(sql, [], |r| r.get(0)).unwrap_or_else(|e| panic!("{sql}: {e}"))
+    open_ro(meta)
+        .query_row(sql, [], |r| r.get(0))
+        .unwrap_or_else(|e| panic!("{sql}: {e}"))
 }
 
 /// INV-22 via a read-only, immutable open of `meta.db`.
@@ -146,38 +174,88 @@ fn check_meta_structure(name: &str, d: &Db, o: &Observed) {
         min == 1 && max == count,
         "INV-22 [{name}]: commits.idx not contiguous 1..={count} (min {min}, max {max})"
     );
-    let orphans = q("SELECT count(*) FROM frames WHERE commit_idx NOT IN (SELECT idx FROM commits)");
-    assert_eq!(orphans, 0, "INV-22 [{name}]: {orphans} frames reference a missing commit");
+    let orphans =
+        q("SELECT count(*) FROM frames WHERE commit_idx NOT IN (SELECT idx FROM commits)");
+    assert_eq!(
+        orphans, 0,
+        "INV-22 [{name}]: {orphans} frames reference a missing commit"
+    );
     let empty = q("SELECT count(*) FROM commits WHERE idx NOT IN (SELECT commit_idx FROM frames)");
     assert_eq!(empty, 0, "INV-22 [{name}]: {empty} commits have no frames");
-    let bad_seq = q("SELECT count(*) FROM (SELECT commit_idx FROM frames GROUP BY commit_idx
-                     HAVING min(seq) != 0 OR max(seq) != count(*) - 1)");
-    assert_eq!(bad_seq, 0, "INV-22 [{name}]: {bad_seq} commits have a non-contiguous frame seq");
+    let bad_seq = q(
+        "SELECT count(*) FROM (SELECT commit_idx FROM frames GROUP BY commit_idx
+                     HAVING min(seq) != 0 OR max(seq) != count(*) - 1)",
+    );
+    assert_eq!(
+        bad_seq, 0,
+        "INV-22 [{name}]: {bad_seq} commits have a non-contiguous frame seq"
+    );
     let frames = q("SELECT count(*) FROM frames") as u64;
-    assert_eq!(frames, o.frames, "INV-22 [{name}]: frames rows {frames} != status.frames {}", o.frames);
-    let bad_len = q(&format!("SELECT count(*) FROM frames WHERE length(page) != {} OR pgno < 1", o.page_size));
-    assert_eq!(bad_len, 0, "INV-22 [{name}]: {bad_len} frames have pgno < 1 or a page not {} bytes", o.page_size);
+    assert_eq!(
+        frames, o.frames,
+        "INV-22 [{name}]: frames rows {frames} != status.frames {}",
+        o.frames
+    );
+    let bad_len = q(&format!(
+        "SELECT count(*) FROM frames WHERE length(page) != {} OR pgno < 1",
+        o.page_size
+    ));
+    assert_eq!(
+        bad_len, 0,
+        "INV-22 [{name}]: {bad_len} frames have pgno < 1 or a page not {} bytes",
+        o.page_size
+    );
 }
 
 /// Check the invariant catalog against db `name` under `root`. `model`, when given, is the
 /// oracle for table contents and commit counts. Returns what was observed.
-pub fn assert_invariants(root: &Path, name: &str, model: Option<&Model>, checks: Checks) -> Observed {
+pub fn assert_invariants(
+    root: &Path,
+    name: &str,
+    model: Option<&Model>,
+    checks: Checks,
+) -> Observed {
     let d = Db::existing(root, name).unwrap_or_else(|e| panic!("assert_invariants [{name}]: {e}"));
     let o = Observed::of(&d);
 
     // INV-27: log length == status.commits (== sum of exec results, == model commits).
-    assert_eq!(o.log.len() as u64, o.commits, "INV-27 [{name}]: log has {} rows, status.commits {}", o.log.len(), o.commits);
+    assert_eq!(
+        o.log.len() as u64,
+        o.commits,
+        "INV-27 [{name}]: log has {} rows, status.commits {}",
+        o.log.len(),
+        o.commits
+    );
     for (i, row) in o.log.iter().enumerate() {
-        assert_eq!(row.n, i as u64 + 1, "INV-27 [{name}]: log row {i} has n={}", row.n);
+        assert_eq!(
+            row.n,
+            i as u64 + 1,
+            "INV-27 [{name}]: log row {i} has n={}",
+            row.n
+        );
     }
     if let Some(m) = model {
-        assert_eq!(o.commits, m.exec_sum, "INV-27 [{name}]: status.commits {} != sum of exec results {}", o.commits, m.exec_sum);
-        assert_eq!(o.commits, m.commits(), "INV-38 [{name}]: status.commits {} != model commits {}", o.commits, m.commits());
+        assert_eq!(
+            o.commits, m.exec_sum,
+            "INV-27 [{name}]: status.commits {} != sum of exec results {}",
+            o.commits, m.exec_sum
+        );
+        assert_eq!(
+            o.commits,
+            m.commits(),
+            "INV-38 [{name}]: status.commits {} != model commits {}",
+            o.commits,
+            m.commits()
+        );
     }
 
     // INV-28: frames per commit sum to status.frames.
     let sum: u64 = o.log.iter().map(|r| r.frames).sum();
-    assert_eq!(sum, o.frames, "INV-28 [{name}]: sum of log frames {sum} != status.frames {}", o.frames);
+    assert_eq!(
+        sum, o.frames,
+        "INV-28 [{name}]: sum of log frames {sum} != status.frames {}",
+        o.frames
+    );
 
     if checks.meta_structure {
         check_meta_structure(name, &d, &o);
@@ -186,7 +264,12 @@ pub fn assert_invariants(root: &Path, name: &str, model: Option<&Model>, checks:
     if checks.list {
         let listed = db::list(root).expect("list");
         let hit = listed.iter().find(|s| s.name == name);
-        assert_eq!(hit.map(|s| s.commits), Some(o.commits), "INV-46 [{name}]: list does not report {} commits", o.commits);
+        assert_eq!(
+            hit.map(|s| s.commits),
+            Some(o.commits),
+            "INV-46 [{name}]: list does not report {} commits",
+            o.commits
+        );
     }
 
     let before = FileHashes::of(&d.dir);
@@ -195,32 +278,51 @@ pub fn assert_invariants(root: &Path, name: &str, model: Option<&Model>, checks:
     let ks = sample_ks(o.commits, checks.clone_every_k);
     for &k in &ks {
         let out = tmp.path().join(format!("clone-{k}.db"));
-        db::clone_at(&d, k, &out).unwrap_or_else(|e| panic!("INV-29 [{name}]: clone -n {k} failed: {e:#}"));
+        db::clone_at(&d, k, &out)
+            .unwrap_or_else(|e| panic!("INV-29 [{name}]: clone -n {k} failed: {e:#}"));
         let bytes = fs::read(&out).unwrap();
 
         // INV-33: clone(0) is base.db; clone(k) is db_pages(k) pages long.
         if k == 0 {
-            assert!(bytes == base, "INV-33 [{name}]: clone -n 0 differs from base.db");
+            assert!(
+                bytes == base,
+                "INV-33 [{name}]: clone -n 0 differs from base.db"
+            );
         } else {
             let want = o.log[k as usize - 1].db_pages * o.page_size;
-            assert_eq!(bytes.len() as u64, want, "INV-33 [{name}]: clone -n {k} is {} bytes, want db_pages*page_size = {want}", bytes.len());
+            assert_eq!(
+                bytes.len() as u64,
+                want,
+                "INV-33 [{name}]: clone -n {k} is {} bytes, want db_pages*page_size = {want}",
+                bytes.len()
+            );
         }
 
         // INV-29: every clone is a valid SQLite database.
         let ic = integrity(&out);
-        assert_eq!(ic, "ok", "INV-29 [{name}]: integrity_check of clone -n {k}: {ic}");
+        assert_eq!(
+            ic, "ok",
+            "INV-29 [{name}]: integrity_check of clone -n {k}: {ic}"
+        );
 
         // INV-30: table contents (and schema) equal the model at commit k.
         if checks.model {
             if let Some(Some(want)) = model.map(|m| &m.snapshots[k as usize]) {
                 let got = TableDump::of_file(&out);
-                assert!(&got == want, "INV-30 [{name}]: clone -n {k} != model: {}", got.diff(want));
+                assert!(
+                    &got == want,
+                    "INV-30 [{name}]: clone -n {k} != model: {}",
+                    got.diff(want)
+                );
             }
         }
 
         // INV-34: clone creates no side files beside its output.
         for suf in ["-wal", "-shm", "-journal"] {
-            assert!(!sidecar(&out, suf).exists(), "INV-34 [{name}]: clone -n {k} left a {suf} file");
+            assert!(
+                !sidecar(&out, suf).exists(),
+                "INV-34 [{name}]: clone -n {k} left a {suf} file"
+            );
         }
     }
 
@@ -242,7 +344,11 @@ pub fn assert_invariants(root: &Path, name: &str, model: Option<&Model>, checks:
         // INV-39: live.db contents are what the model says history produced.
         if let (true, Some(m)) = (checks.model, model) {
             let (got, want) = (TableDump::of_file(&d.live), m.current());
-            assert!(got == want, "INV-39 [{name}]: live.db != model: {}", got.diff(&want));
+            assert!(
+                got == want,
+                "INV-39 [{name}]: live.db != model: {}",
+                got.diff(&want)
+            );
         }
     }
 
@@ -250,7 +356,11 @@ pub fn assert_invariants(root: &Path, name: &str, model: Option<&Model>, checks:
     if checks.hashes {
         let after = FileHashes::of(&d.dir);
         for (f, h) in &before.0 {
-            assert_eq!(Some(h), after.0.get(f), "INV-34 [{name}]: {f} changed while cloning");
+            assert_eq!(
+                Some(h),
+                after.0.get(f),
+                "INV-34 [{name}]: {f} changed while cloning"
+            );
         }
     }
     o

@@ -18,7 +18,9 @@ pub struct Harness {
 
 impl Harness {
     pub fn new() -> Self {
-        Self { tmp: tempfile::tempdir().unwrap() }
+        Self {
+            tmp: tempfile::tempdir().unwrap(),
+        }
     }
 
     pub fn root(&self) -> PathBuf {
@@ -51,14 +53,21 @@ impl Harness {
     /// Run, expect success, return stdout.
     pub fn ok(&self, args: &[&str]) -> String {
         let o = self.run(args);
-        assert!(o.status.success(), "walflip {args:?} failed: {}", String::from_utf8_lossy(&o.stderr));
+        assert!(
+            o.status.success(),
+            "walflip {args:?} failed: {}",
+            String::from_utf8_lossy(&o.stderr)
+        );
         String::from_utf8(o.stdout).unwrap()
     }
 
     /// Run, expect failure, return stderr.
     pub fn err(&self, args: &[&str]) -> String {
         let o = self.run(args);
-        assert!(!o.status.success(), "walflip {args:?} unexpectedly succeeded");
+        assert!(
+            !o.status.success(),
+            "walflip {args:?} unexpectedly succeeded"
+        );
         String::from_utf8(o.stderr).unwrap()
     }
 
@@ -72,7 +81,12 @@ impl Harness {
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
-        child.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
         child.wait_with_output().unwrap()
     }
 
@@ -95,9 +109,14 @@ impl Harness {
     pub fn wal_snapshot(&self, db: &str, sql: &str) -> Vec<u8> {
         let live = self.root().join(db).join("live.db");
         let conn = Connection::open(&live).unwrap();
-        conn.execute_batch("BEGIN; SELECT count(*) FROM sqlite_master;").unwrap();
+        conn.execute_batch("BEGIN; SELECT count(*) FROM sqlite_master;")
+            .unwrap();
         let o = self.with_stdin(&["--db", db, "exec", "-"], sql);
-        assert!(o.status.success(), "exec failed: {}", String::from_utf8_lossy(&o.stderr));
+        assert!(
+            o.status.success(),
+            "exec failed: {}",
+            String::from_utf8_lossy(&o.stderr)
+        );
         let wal = std::fs::read(format!("{}-wal", live.display())).unwrap();
         conn.execute_batch("COMMIT").unwrap();
         wal
@@ -152,6 +171,12 @@ pub fn texts(path: &Path, sql: &str) -> Vec<String> {
 pub fn parse_captured(stdout: &str) -> u64 {
     stdout
         .lines()
-        .find_map(|l| l.strip_prefix("captured ")?.split_whitespace().next()?.parse().ok())
+        .find_map(|l| {
+            l.strip_prefix("captured ")?
+                .split_whitespace()
+                .next()?
+                .parse()
+                .ok()
+        })
         .unwrap_or_else(|| panic!("no `captured N` line in {stdout:?}"))
 }

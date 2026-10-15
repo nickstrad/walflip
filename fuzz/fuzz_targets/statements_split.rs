@@ -18,7 +18,11 @@ fuzz_target!(|text: &str| {
         assert_eq!(s.trim(), s.as_str());
         assert!(!s.contains('\n'));
     }
-    let want: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    let want: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
     assert_eq!(stmts.join("\n"), want.join("\n"));
 
     match split_script(text) {

@@ -46,7 +46,9 @@ fn wal_path() -> &'static PathBuf {
 }
 
 fuzz_target!(|data: &[u8]| {
-    let Some((&ctl, rest)) = data.split_first() else { return };
+    let Some((&ctl, rest)) = data.split_first() else {
+        return;
+    };
     let page_size = 512u32 << (ctl & 3);
     let mut bytes = Vec::new();
     if ctl & 0x80 != 0 {
@@ -76,17 +78,31 @@ fuzz_target!(|data: &[u8]| {
     if first.is_ok() {
         let pending = stepped.uncaptured(path).unwrap();
         let second = stepped.capture(path, "fuzz");
-        assert_eq!(second.is_ok(), whole.is_ok(), "two-step and one-shot capture disagree on failure");
+        assert_eq!(
+            second.is_ok(),
+            whole.is_ok(),
+            "two-step and one-shot capture disagree on failure"
+        );
         if let (Ok(n), Ok(_)) = (second, &whole) {
-            assert_eq!(pending, n as u64, "uncaptured != what the next capture adds");
-            assert!(history(&stepped) == history(&store), "prefix + resumed capture != one-shot capture");
+            assert_eq!(
+                pending, n as u64,
+                "uncaptured != what the next capture adds"
+            );
+            assert!(
+                history(&stepped) == history(&store),
+                "prefix + resumed capture != one-shot capture"
+            );
         }
     }
     if whole.is_err() {
         return;
     }
     let n = store.commit_count().unwrap();
-    assert_eq!(store.capture(path, "fuzz").unwrap(), 0, "capture must be idempotent");
+    assert_eq!(
+        store.capture(path, "fuzz").unwrap(),
+        0,
+        "capture must be idempotent"
+    );
     assert_eq!(store.commit_count().unwrap(), n);
 
     let c = store.conn();
@@ -99,7 +115,11 @@ fuzz_target!(|data: &[u8]| {
         .collect();
     assert_eq!(idxs, (1..=n as i64).collect::<Vec<_>>());
     let bad: i64 = c
-        .query_row("SELECT count(*) FROM frames WHERE length(page) != ?1", [page_size], |r| r.get(0))
+        .query_row(
+            "SELECT count(*) FROM frames WHERE length(page) != ?1",
+            [page_size],
+            |r| r.get(0),
+        )
         .unwrap();
     assert_eq!(bad, 0);
 });

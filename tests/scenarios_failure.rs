@@ -55,7 +55,11 @@ fn s10() -> Scenario {
 #[test]
 fn s10_transaction_control_cli() {
     let o = s10().run(Driver::Cli);
-    assert_eq!(o.log().len(), 4, "INV-38: only the four good statements committed");
+    assert_eq!(
+        o.log().len(),
+        4,
+        "INV-38: only the four good statements committed"
+    );
 }
 
 #[test]
@@ -84,8 +88,15 @@ fn s10_commit_inside_statement_changes_nothing() {
     ] {
         let (obs, hashes) = (Observed::of(&d), FileHashes::of(&d.dir));
         let err = h.err(&["--db", "b2", "exec", sql]);
-        assert!(err.contains(TX_ERR), "error should name transaction control: {err}");
-        assert_eq!(Observed::of(&d), obs, "INV-37: status/log changed after: {sql}");
+        assert!(
+            err.contains(TX_ERR),
+            "error should name transaction control: {err}"
+        );
+        assert_eq!(
+            Observed::of(&d),
+            obs,
+            "INV-37: status/log changed after: {sql}"
+        );
         let after = FileHashes::of(&d.dir);
         for f in ["live.db", "base.db", "meta.db"] {
             assert_eq!(hashes.0[f], after.0[f], "INV-37: {f} changed after: {sql}");
@@ -117,36 +128,56 @@ fn batch_fails(driver: Driver, text: &str, ok: usize, want_err: &str) {
     let seed = ins("seed");
     let n = match driver {
         Driver::Cli => h.exec(name, &seed),
-        Driver::Lib => db::exec(&Db::existing(&root, name).unwrap(), &[seed.clone()]).unwrap() as u64,
+        Driver::Lib => {
+            db::exec(&Db::existing(&root, name).unwrap(), &[seed.clone()]).unwrap() as u64
+        }
     };
     m.exec(&seed, n);
 
     let err = match driver {
         Driver::Cli => {
             let o = h.with_stdin(&["--db", name, "exec", "-"], text);
-            assert!(!o.status.success(), "batch unexpectedly succeeded: {text:?}");
-            assert!(!String::from_utf8_lossy(&o.stdout).contains("captured"), "a failed batch prints no total");
+            assert!(
+                !o.status.success(),
+                "batch unexpectedly succeeded: {text:?}"
+            );
+            assert!(
+                !String::from_utf8_lossy(&o.stdout).contains("captured"),
+                "a failed batch prints no total"
+            );
             String::from_utf8(o.stderr).unwrap()
         }
         Driver::Lib => {
             let d = Db::existing(&root, name).unwrap();
-            format!("{:#}", db::exec(&d, &db::parse_statements(text)).expect_err("batch should fail"))
+            format!(
+                "{:#}",
+                db::exec(&d, &db::parse_statements(text)).expect_err("batch should fail")
+            )
         }
     };
-    assert!(err.contains(want_err), "[{driver:?}] error should contain {want_err:?}: {err}");
+    assert!(
+        err.contains(want_err),
+        "[{driver:?}] error should contain {want_err:?}: {err}"
+    );
 
     // Shadow is fed only the lines before the failure, one commit each.
     for line in db::parse_statements(text).iter().take(ok) {
         m.exec(line, 1);
     }
     let o = assert_invariants(&root, name, Some(&m), Checks::full());
-    assert_eq!(o.commits, 1 + ok as u64, "[{driver:?}] commits after a failed batch");
+    assert_eq!(
+        o.commits,
+        1 + ok as u64,
+        "[{driver:?}] commits after a failed batch"
+    );
 
     // The db is still usable and history stays consistent.
     let after = ins("after");
     let n = match driver {
         Driver::Cli => parse_captured(&h.ok(&["--db", name, "exec", &after])),
-        Driver::Lib => db::exec(&Db::existing(&root, name).unwrap(), &[after.clone()]).unwrap() as u64,
+        Driver::Lib => {
+            db::exec(&Db::existing(&root, name).unwrap(), &[after.clone()]).unwrap() as u64
+        }
     };
     m.exec(&after, n);
     assert_invariants(&root, name, Some(&m), Checks::full());
@@ -177,7 +208,11 @@ fn s10_batch_with_commit_inside_a_line() {
 
 #[test]
 fn s10_batch_with_begin_without_commit() {
-    both("INSERT INTO t(v) VALUES('1')\nBEGIN;\nINSERT INTO t(v) VALUES('2')\n", 1, TX_ERR);
+    both(
+        "INSERT INTO t(v) VALUES('1')\nBEGIN;\nINSERT INTO t(v) VALUES('2')\n",
+        1,
+        TX_ERR,
+    );
 }
 
 /// INV-50: `exec -` splits on lines, so a statement spread over lines fails on its first line
@@ -208,11 +243,24 @@ fn orphan_commit_is_recovered_before_the_statement() {
     ext.execute_batch(&ins("external")).unwrap();
 
     let r = db::exec_with(&d, &[ins("b")], walflip::store::DEFAULT_BUSY_TIMEOUT).unwrap();
-    assert_eq!(r, db::ExecReport { captured: 2, recovered: 1 });
+    assert_eq!(
+        r,
+        db::ExecReport {
+            captured: 2,
+            recovered: 1
+        }
+    );
     drop(ext);
 
-    let labels: Vec<String> = db::log(&d, 10, false).unwrap().into_iter().map(|e| e.sql).collect();
-    assert_eq!(labels, [ins("a"), db::RECOVERED_LABEL.to_string(), ins("b")]);
+    let labels: Vec<String> = db::log(&d, 10, false)
+        .unwrap()
+        .into_iter()
+        .map(|e| e.sql)
+        .collect();
+    assert_eq!(
+        labels,
+        [ins("a"), db::RECOVERED_LABEL.to_string(), ins("b")]
+    );
 
     let mut m = Model::new(Some(SCHEMA));
     m.exec(&ins("a"), 1);
@@ -227,11 +275,31 @@ fn failed_batch_reports_commits_captured_before_it() {
     let tmp = tempfile::tempdir().unwrap();
     let d = Db::new(tmp.path(), "fb").unwrap();
     db::create(&d, Some(SCHEMA)).unwrap();
-    let err = db::exec(&d, &[ins("1"), ins("2"), "INSERT INTO nope VALUES(1)".into(), ins("4")])
-        .expect_err("line 3 fails");
-    let f = err.downcast_ref::<db::ExecFailed>().expect("error carries ExecFailed");
-    assert_eq!(*f, db::ExecFailed { captured: 2, recovered: 0, statement: 3 });
-    assert!(format!("{err:#}").contains("no such table: nope"), "{err:#}");
+    let err = db::exec(
+        &d,
+        &[
+            ins("1"),
+            ins("2"),
+            "INSERT INTO nope VALUES(1)".into(),
+            ins("4"),
+        ],
+    )
+    .expect_err("line 3 fails");
+    let f = err
+        .downcast_ref::<db::ExecFailed>()
+        .expect("error carries ExecFailed");
+    assert_eq!(
+        *f,
+        db::ExecFailed {
+            captured: 2,
+            recovered: 0,
+            statement: 3
+        }
+    );
+    assert!(
+        format!("{err:#}").contains("no such table: nope"),
+        "{err:#}"
+    );
     // Nothing captured yet: no ExecFailed context, the error is the statement's own.
     let err = db::exec(&d, &["INSERT INTO nope VALUES(1)".into()]).unwrap_err();
     assert!(err.downcast_ref::<db::ExecFailed>().is_none());
@@ -266,7 +334,10 @@ fn s10_script_mode_runs_multi_line_ddl_batch() {
     let lines_model = seeded(&h, "lines");
     let o = h.with_stdin(&["--db", "lines", "exec", "-"], SCRIPT);
     assert!(!o.status.success());
-    assert!(String::from_utf8_lossy(&o.stderr).contains("incomplete input"), "line mode should fail");
+    assert!(
+        String::from_utf8_lossy(&o.stderr).contains("incomplete input"),
+        "line mode should fail"
+    );
     assert_invariants(&h.root(), "lines", Some(&lines_model), Checks::full());
 
     let file = h.path("batch.sql");
@@ -274,17 +345,31 @@ fn s10_script_mode_runs_multi_line_ddl_batch() {
     for (name, source) in [("stdin", "-"), ("file", file.to_str().unwrap())] {
         let mut m = seeded(&h, name);
         let o = h.with_stdin(&["--db", name, "exec", "--script", source], SCRIPT);
-        assert!(o.status.success(), "[{name}] {}", String::from_utf8_lossy(&o.stderr));
-        assert_eq!(parse_captured(&String::from_utf8(o.stdout).unwrap()), 4, "[{name}]");
+        assert!(
+            o.status.success(),
+            "[{name}] {}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+        assert_eq!(
+            parse_captured(&String::from_utf8(o.stdout).unwrap()),
+            4,
+            "[{name}]"
+        );
         for s in &stmts {
             m.exec(s, 1);
         }
         let obs = assert_invariants(&h.root(), name, Some(&m), Checks::full());
         let labels: Vec<&String> = obs.log.iter().skip(1).map(|r| &r.sql).collect();
-        assert_eq!(labels, stmts.iter().collect::<Vec<_>>(), "[{name}] labels are the statements");
+        assert_eq!(
+            labels,
+            stmts.iter().collect::<Vec<_>>(),
+            "[{name}] labels are the statements"
+        );
     }
 
-    assert!(h.err(&["--db", "stdin", "exec", "--script", "-", "SELECT 1"]).contains("cannot be used"));
+    assert!(h
+        .err(&["--db", "stdin", "exec", "--script", "-", "SELECT 1"])
+        .contains("cannot be used"));
     assert!(h.err(&["--db", "stdin", "exec"]).contains("required"));
 }
 
@@ -293,10 +378,16 @@ fn s10_script_mode_runs_multi_line_ddl_batch() {
 fn s10_script_unterminated_tail_runs_nothing() {
     let h = Harness::new();
     let m = seeded(&h, "tail");
-    let o = h.with_stdin(&["--db", "tail", "exec", "--script", "-"], &format!("{};\n{}\n", ins("1"), ins("2")));
+    let o = h.with_stdin(
+        &["--db", "tail", "exec", "--script", "-"],
+        &format!("{};\n{}\n", ins("1"), ins("2")),
+    );
     assert!(!o.status.success());
     let err = String::from_utf8(o.stderr).unwrap();
-    assert!(err.contains("incomplete input") && err.contains("line 2"), "{err}");
+    assert!(
+        err.contains("incomplete input") && err.contains("line 2"),
+        "{err}"
+    );
     let obs = assert_invariants(&h.root(), "tail", Some(&m), Checks::full());
     assert_eq!(obs.commits, 1, "nothing from the script ran");
 }
@@ -307,11 +398,18 @@ fn s10_script_unterminated_tail_runs_nothing() {
 fn s10_script_failing_statement_stops_batch() {
     let h = Harness::new();
     let mut m = seeded(&h, "stop");
-    let text = format!("{};\nINSERT INTO nope\n  VALUES(1);\n{};\n", ins("1"), ins("2"));
+    let text = format!(
+        "{};\nINSERT INTO nope\n  VALUES(1);\n{};\n",
+        ins("1"),
+        ins("2")
+    );
     let o = h.with_stdin(&["--db", "stop", "exec", "--script", "-"], &text);
     assert!(!o.status.success());
     let err = String::from_utf8(o.stderr).unwrap();
-    assert!(err.contains("no such table: nope") && err.contains("statement 2 failed"), "{err}");
+    assert!(
+        err.contains("no such table: nope") && err.contains("statement 2 failed"),
+        "{err}"
+    );
     m.exec(&format!("{};", ins("1")), 1);
     let obs = assert_invariants(&h.root(), "stop", Some(&m), Checks::full());
     assert_eq!(obs.commits, 2);
@@ -322,16 +420,28 @@ fn s10_script_failing_statement_stops_batch() {
 fn log_shows_multi_line_labels_on_one_row() {
     let h = Harness::new();
     seeded(&h, "lg");
-    let o = h.with_stdin(&["--db", "lg", "exec", "--script", "-"], "CREATE TABLE u(\n  a INTEGER\n);\n");
+    let o = h.with_stdin(
+        &["--db", "lg", "exec", "--script", "-"],
+        "CREATE TABLE u(\n  a INTEGER\n);\n",
+    );
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
     h.exec("lg", "INSERT INTO t(v)\r\nVALUES('crlf')");
     let out = h.ok(&["--db", "lg", "log"]);
     let rows: Vec<&str> = out.lines().collect();
     assert_eq!(rows.len(), 4, "header + 3 commits, one line each:\n{out}");
-    assert!(rows[2].ends_with("  CREATE TABLE u(\\n  a INTEGER\\n);"), "{out}");
-    assert!(rows[3].ends_with("  INSERT INTO t(v)\\nVALUES('crlf')"), "{out}");
-    let stored: Vec<String> =
-        db::log(&Db::existing(&h.root(), "lg").unwrap(), 10, false).unwrap().into_iter().map(|e| e.sql).collect();
+    assert!(
+        rows[2].ends_with("  CREATE TABLE u(\\n  a INTEGER\\n);"),
+        "{out}"
+    );
+    assert!(
+        rows[3].ends_with("  INSERT INTO t(v)\\nVALUES('crlf')"),
+        "{out}"
+    );
+    let stored: Vec<String> = db::log(&Db::existing(&h.root(), "lg").unwrap(), 10, false)
+        .unwrap()
+        .into_iter()
+        .map(|e| e.sql)
+        .collect();
     assert_eq!(stored[1], "CREATE TABLE u(\n  a INTEGER\n);");
     assert_eq!(stored[2], "INSERT INTO t(v)\r\nVALUES('crlf')");
 }

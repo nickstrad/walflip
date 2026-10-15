@@ -69,19 +69,47 @@ enum HeaderField {
 
 #[derive(Arbitrary, Debug)]
 enum Mutation {
-    FlipByte { pos: usize, mask: u8 },
-    Truncate { at: usize },
-    OverwriteSalt { frame: usize, second: bool, value: u32 },
-    DuplicateFrame { frame: usize },
-    SwapFrames { a: usize, b: usize },
-    AppendGarbage { bytes: Vec<u8> },
+    FlipByte {
+        pos: usize,
+        mask: u8,
+    },
+    Truncate {
+        at: usize,
+    },
+    OverwriteSalt {
+        frame: usize,
+        second: bool,
+        value: u32,
+    },
+    DuplicateFrame {
+        frame: usize,
+    },
+    SwapFrames {
+        a: usize,
+        b: usize,
+    },
+    AppendGarbage {
+        bytes: Vec<u8>,
+    },
     /// Frames of another WAL generation (different salt) appended after the current one.
-    AppendStaleGeneration { salt_xor: (u32, u32), frames: Vec<FrameSpec> },
-    ZeroChecksum { frame: usize },
+    AppendStaleGeneration {
+        salt_xor: (u32, u32),
+        frames: Vec<FrameSpec>,
+    },
+    ZeroChecksum {
+        frame: usize,
+    },
     /// Overwrite a header field; `resum` recomputes the header checksum afterwards.
-    PatchHeader { field: HeaderField, value: u32, resum: bool },
+    PatchHeader {
+        field: HeaderField,
+        value: u32,
+        resum: bool,
+    },
     /// WAL restart: a new generation (salt xor `salt_xor`) written over the head of the file.
-    Restart { salt_xor: (u32, u32), commits: Vec<CommitSpec> },
+    Restart {
+        salt_xor: (u32, u32),
+        commits: Vec<CommitSpec>,
+    },
 }
 
 #[derive(Arbitrary, Debug)]
@@ -114,7 +142,11 @@ fn page(seed: u32, page_size: usize) -> Vec<u8> {
 }
 
 fn frames(specs: &[FrameSpec], limit: usize, ps: usize) -> Vec<(u32, Vec<u8>)> {
-    specs.iter().take(limit).map(|f| (f.pgno, page(f.seed, ps))).collect()
+    specs
+        .iter()
+        .take(limit)
+        .map(|f| (f.pgno, page(f.seed, ps)))
+        .collect()
 }
 
 fn be32(b: &[u8]) -> u32 {
@@ -129,7 +161,11 @@ fn put32(b: &mut [u8], v: u32) {
 fn checksum(big_endian: bool, data: &[u8]) -> (u32, u32) {
     let rd = |b: &[u8]| {
         let a: [u8; 4] = b.try_into().unwrap();
-        if big_endian { u32::from_be_bytes(a) } else { u32::from_le_bytes(a) }
+        if big_endian {
+            u32::from_be_bytes(a)
+        } else {
+            u32::from_le_bytes(a)
+        }
     };
     let (mut s0, mut s1) = (0u32, 0u32);
     for c in data.chunks_exact(8) {
@@ -156,7 +192,12 @@ fuzz_target!(|input: Input| {
         .iter()
         .take(MAX_COMMITS)
         .filter(|c| !c.frames.is_empty())
-        .map(|c| (frames(&c.frames, MAX_FRAMES_PER_COMMIT, ps), c.db_pages.max(1)))
+        .map(|c| {
+            (
+                frames(&c.frames, MAX_FRAMES_PER_COMMIT, ps),
+                c.db_pages.max(1),
+            )
+        })
         .collect();
     let tail = frames(&input.tail, MAX_TAIL, ps);
 
@@ -182,8 +223,16 @@ fuzz_target!(|input: Input| {
     let mut restarted: Option<Commits> = None;
 
     let frame_at = |k: usize| WAL_HEADER + k * flen;
-    let exact = Expect { lo: all, hi: all, extra_ok: false };
-    let damaged = |k: usize| Expect { lo: before(k), hi: before(k), extra_ok: false };
+    let exact = Expect {
+        lo: all,
+        hi: all,
+        extra_ok: false,
+    };
+    let damaged = |k: usize| Expect {
+        lo: before(k),
+        hi: before(k),
+        extra_ok: false,
+    };
 
     let expect = match &input.mutation {
         None => exact,
@@ -193,7 +242,11 @@ fuzz_target!(|input: Input| {
             if pos < 4 {
                 // A flip can turn one valid magic into the other: the header is then checksummed
                 // in the other byte order, which is not provably a mismatch. Prefix only.
-                Expect { lo: 0, hi: all, extra_ok: false }
+                Expect {
+                    lo: 0,
+                    hi: all,
+                    extra_ok: false,
+                }
             } else if pos < WAL_HEADER {
                 damaged(0)
             } else {
@@ -209,7 +262,11 @@ fuzz_target!(|input: Input| {
                 damaged((at - WAL_HEADER) / flen)
             }
         }
-        Some(Mutation::OverwriteSalt { frame, second, value }) if n_frames > 0 => {
+        Some(Mutation::OverwriteSalt {
+            frame,
+            second,
+            value,
+        }) if n_frames > 0 => {
             let k = frame % n_frames;
             let off = frame_at(k) + if *second { 12 } else { 8 };
             if be32(&buf[off..]) == *value {
@@ -235,7 +292,11 @@ fuzz_target!(|input: Input| {
             let k = frame % n_frames;
             let copy = buf[frame_at(k)..frame_at(k + 1)].to_vec();
             buf.splice(frame_at(k + 1)..frame_at(k + 1), copy);
-            Expect { lo: before(k + 1), hi: all, extra_ok: false }
+            Expect {
+                lo: before(k + 1),
+                hi: all,
+                extra_ok: false,
+            }
         }
         Some(Mutation::SwapFrames { a, b }) if n_frames > 1 => {
             let (a, b) = (a % n_frames, b % n_frames);
@@ -247,21 +308,36 @@ fuzz_target!(|input: Input| {
             } else {
                 buf[frame_at(a)..frame_at(a + 1)].copy_from_slice(&fb);
                 buf[frame_at(b)..frame_at(b + 1)].copy_from_slice(&fa);
-                Expect { lo: before(a), hi: all, extra_ok: false }
+                Expect {
+                    lo: before(a),
+                    hi: all,
+                    extra_ok: false,
+                }
             }
         }
         Some(Mutation::AppendGarbage { bytes }) => {
             buf.extend(bytes.iter().take(MAX_GARBAGE));
-            Expect { lo: all, hi: all, extra_ok: !bytes.is_empty() }
+            Expect {
+                lo: all,
+                hi: all,
+                extra_ok: !bytes.is_empty(),
+            }
         }
-        Some(Mutation::AppendStaleGeneration { salt_xor, frames: specs }) if *salt_xor != (0, 0) => {
+        Some(Mutation::AppendStaleGeneration {
+            salt_xor,
+            frames: specs,
+        }) if *salt_xor != (0, 0) => {
             let stale_salt = (input.salt.0 ^ salt_xor.0, input.salt.1 ^ salt_xor.1);
             let stale: Commits = vec![(frames(specs, MAX_FRAMES_PER_COMMIT, ps), 1)];
             let other = wal::encode::encode(input.big_endian, stale_salt, ps as u32, &stale);
             buf.extend_from_slice(&other[WAL_HEADER..]);
             exact
         }
-        Some(Mutation::PatchHeader { field, value, resum }) => {
+        Some(Mutation::PatchHeader {
+            field,
+            value,
+            resum,
+        }) => {
             let off = match field {
                 HeaderField::Magic => 0,
                 HeaderField::Version => 4,
@@ -275,7 +351,11 @@ fuzz_target!(|input: Input| {
             } else {
                 put32(&mut buf[off..], *value);
                 if matches!(field, HeaderField::Magic) && !*resum {
-                    Expect { lo: 0, hi: all, extra_ok: false }
+                    Expect {
+                        lo: 0,
+                        hi: all,
+                        extra_ok: false,
+                    }
                 } else if !*resum {
                     damaged(0)
                 } else {
@@ -291,20 +371,32 @@ fuzz_target!(|input: Input| {
                     }
                     match field {
                         // Byte order or frame layout changed: no clean proof, prefix only.
-                        HeaderField::Magic | HeaderField::PageSize => Expect { lo: 0, hi: all, extra_ok: false },
+                        HeaderField::Magic | HeaderField::PageSize => Expect {
+                            lo: 0,
+                            hi: all,
+                            extra_ok: false,
+                        },
                         // Salt mismatch, or the header checksum that seeds frame 0's chain changed.
                         _ => damaged(0),
                     }
                 }
             }
         }
-        Some(Mutation::Restart { salt_xor, commits: specs }) if *salt_xor != (0, 0) => {
+        Some(Mutation::Restart {
+            salt_xor,
+            commits: specs,
+        }) if *salt_xor != (0, 0) => {
             let salt = (input.salt.0 ^ salt_xor.0, input.salt.1 ^ salt_xor.1);
             let new: Commits = specs
                 .iter()
                 .take(MAX_COMMITS)
                 .filter(|c| !c.frames.is_empty())
-                .map(|c| (frames(&c.frames, MAX_FRAMES_PER_COMMIT, ps), c.db_pages.max(1)))
+                .map(|c| {
+                    (
+                        frames(&c.frames, MAX_FRAMES_PER_COMMIT, ps),
+                        c.db_pages.max(1),
+                    )
+                })
                 .collect();
             let head = wal::encode::encode(input.big_endian, salt, ps as u32, &new);
             if buf.len() < head.len() {
@@ -321,8 +413,13 @@ fuzz_target!(|input: Input| {
     check_resume(&buf, &original, input.split, input.stale_split);
     if let Some(new) = restarted {
         // Old-generation frames left after the new ones carry the old salt: never admitted.
-        let w = wal::parse(&buf).expect("restart header is valid").expect("restart header is sealed");
-        assert!(owned(&w) == new, "restart: parse is not exactly the new generation");
+        let w = wal::parse(&buf)
+            .expect("restart header is valid")
+            .expect("restart header is sealed");
+        assert!(
+            owned(&w) == new,
+            "restart: parse is not exactly the new generation"
+        );
         return;
     }
 
@@ -334,16 +431,37 @@ fuzz_target!(|input: Input| {
     };
 
     if input.mutation.is_none() {
-        let w = parsed.as_ref().expect("valid WAL rejected").as_ref().expect("valid WAL reported empty");
+        let w = parsed
+            .as_ref()
+            .expect("valid WAL rejected")
+            .as_ref()
+            .expect("valid WAL reported empty");
         assert_eq!(w.page_size as usize, ps);
         assert_eq!(w.salt, input.salt);
-        assert!(got == commits, "unmutated parse differs: {} commits, expected {}", got.len(), all);
+        assert!(
+            got == commits,
+            "unmutated parse differs: {} commits, expected {}",
+            got.len(),
+            all
+        );
         return;
     }
 
-    let n = if expect.extra_ok { got.len().min(all) } else { got.len() };
-    assert!(n <= all, "parsed {} commits, input has only {}", got.len(), all);
-    assert!(got[..n] == commits[..n], "parsed commits are not a prefix of the input (altered data)");
+    let n = if expect.extra_ok {
+        got.len().min(all)
+    } else {
+        got.len()
+    };
+    assert!(
+        n <= all,
+        "parsed {} commits, input has only {}",
+        got.len(),
+        all
+    );
+    assert!(
+        got[..n] == commits[..n],
+        "parsed commits are not a prefix of the input (altered data)"
+    );
     assert!(
         expect.lo <= n && n <= expect.hi,
         "parsed {} commits, oracle expects between {} and {}",
@@ -357,7 +475,15 @@ fuzz_target!(|input: Input| {
 });
 
 fn owned(w: &wal::Wal) -> Commits {
-    w.commits.iter().map(|c| (c.frames.iter().map(|f| (f.pgno, f.page.to_vec())).collect(), c.db_pages)).collect()
+    w.commits
+        .iter()
+        .map(|c| {
+            (
+                c.frames.iter().map(|f| (f.pgno, f.page.to_vec())).collect(),
+                c.db_pages,
+            )
+        })
+        .collect()
 }
 
 /// Resume from `from` against the whole file `buf`, reading it as a capture does.
@@ -373,32 +499,53 @@ fn check_resume(buf: &[u8], original: &[u8], split: u32, stale_split: u32) {
         let o = wal::parse(original).unwrap().unwrap();
         let cut = WAL_HEADER + stale_split as usize % (original.len() - WAL_HEADER + 1);
         let state = wal::parse(&original[..cut]).unwrap().unwrap().end;
-        assert!(resume_on(buf, &o.end).is_none() && resume_on(buf, &state).is_none(), "state fit a WAL without a valid header");
+        assert!(
+            resume_on(buf, &o.end).is_none() && resume_on(buf, &state).is_none(),
+            "state fit a WAL without a valid header"
+        );
         return;
     };
 
     // Split: any prefix of this very buffer.
     let cut = WAL_HEADER + split as usize % (buf.len() - WAL_HEADER + 1);
-    let prefix = wal::parse(&buf[..cut]).expect("prefix of a valid header").expect("prefix has the header");
+    let prefix = wal::parse(&buf[..cut])
+        .expect("prefix of a valid header")
+        .expect("prefix has the header");
     let rest = resume_on(buf, &prefix.end).expect("a state from a prefix fits the whole buffer");
     let mut got = owned(&prefix);
     got.extend(owned(&rest));
     assert!(got == owned(&full), "prefix + resumed != full parse");
-    assert_eq!(rest.end, full.end, "resumed end state != full parse end state");
+    assert_eq!(
+        rest.end, full.end,
+        "resumed end state != full parse end state"
+    );
     assert_eq!(rest.end.commits as usize, full.commits.len());
 
     // Stale state from the unmutated WAL.
     let cut = WAL_HEADER + stale_split as usize % (original.len() - WAL_HEADER + 1);
     let state = wal::parse(&original[..cut]).unwrap().unwrap().end;
-    let first_diff = buf.iter().zip(original).position(|(a, b)| a != b).unwrap_or(buf.len().min(original.len()));
+    let first_diff = buf
+        .iter()
+        .zip(original)
+        .position(|(a, b)| a != b)
+        .unwrap_or(buf.len().min(original.len()));
     let resumed = resume_on(buf, &state);
     if (buf.len() as u64) < state.offset || first_diff < WAL_HEADER {
-        assert!(resumed.is_none(), "state accepted by a shorter file or another header");
+        assert!(
+            resumed.is_none(),
+            "state accepted by a shorter file or another header"
+        );
     } else if first_diff as u64 >= state.offset {
         let r = resumed.expect("prefix up to the state is intact, so the state must fit");
         let all = owned(&full);
-        assert!(all.len() >= state.commits as usize, "full parse lost commits before an intact state");
-        assert!(owned(&r)[..] == all[state.commits as usize..], "stale resume != full parse past the state");
+        assert!(
+            all.len() >= state.commits as usize,
+            "full parse lost commits before an intact state"
+        );
+        assert!(
+            owned(&r)[..] == all[state.commits as usize..],
+            "stale resume != full parse past the state"
+        );
         assert_eq!(r.end, full.end);
     }
     // A change inside the prefix (after the header) is outside the resume contract: the WAL is

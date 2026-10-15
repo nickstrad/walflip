@@ -34,7 +34,10 @@ fn write_seed(target: &str, name: &str, bytes: &[u8]) {
 /// The control byte selects page size 512 << (ctl & 3), so only 512..=4096 can be expressed.
 fn write_wal(name: &str, wal: &[u8], page_size: u32) {
     write_seed("wal_parse", name, wal);
-    if let Some(idx) = [512u32, 1024, 2048, 4096].iter().position(|&p| p == page_size) {
+    if let Some(idx) = [512u32, 1024, 2048, 4096]
+        .iter()
+        .position(|&p| p == page_size)
+    {
         let mut cap = vec![idx as u8];
         cap.extend_from_slice(wal);
         write_seed("store_capture", name, &cap);
@@ -50,7 +53,11 @@ fn read_live_wal(db_dir: &Path) -> Vec<u8> {
 fn real_wals(h: &Harness) {
     // 1 frame: a single-row insert into a table whose page is already in the base file.
     h.create("one", SCHEMA);
-    write_wal("real-one-frame", &h.wal_snapshot("one", "INSERT INTO t(v) VALUES('a')"), 4096);
+    write_wal(
+        "real-one-frame",
+        &h.wal_snapshot("one", "INSERT INTO t(v) VALUES('a')"),
+        4096,
+    );
 
     // Multi-page commit: a ~18 KB text value overflows onto several pages.
     h.create("blob", SCHEMA);
@@ -59,18 +66,33 @@ fn real_wals(h: &Harness) {
 
     // DDL commit: schema change in its own transaction.
     h.create("ddl", SCHEMA);
-    write_wal("real-ddl", &h.wal_snapshot("ddl", "CREATE TABLE u(x, y)"), 4096);
+    write_wal(
+        "real-ddl",
+        &h.wal_snapshot("ddl", "CREATE TABLE u(x, y)"),
+        4096,
+    );
 
     // 50 commits in one batch: one statement per line, each its own commit.
     h.create("batch", SCHEMA);
-    let batch: Vec<String> = (0..50).map(|i| format!("INSERT INTO t(v) VALUES('row {i}')")).collect();
-    write_wal("real-batch50", &h.wal_snapshot("batch", &batch.join("\n")), 4096);
+    let batch: Vec<String> = (0..50)
+        .map(|i| format!("INSERT INTO t(v) VALUES('row {i}')"))
+        .collect();
+    write_wal(
+        "real-batch50",
+        &h.wal_snapshot("batch", &batch.join("\n")),
+        4096,
+    );
 
     // VACUUM generation: grow the file, delete, then VACUUM (db_pages shrinks). The WAL is
     // read while the VACUUM connection is still open.
     h.create("vac", SCHEMA);
     let fill: Vec<String> = (0..60)
-        .map(|i| format!("INSERT INTO t(v) VALUES(replace(hex(zeroblob(3000)),'0','{}'))", i % 10))
+        .map(|i| {
+            format!(
+                "INSERT INTO t(v) VALUES(replace(hex(zeroblob(3000)),'0','{}'))",
+                i % 10
+            )
+        })
         .collect();
     h.with_stdin(&["--db", "vac", "exec", "-"], &fill.join("\n"));
     h.exec("vac", "DELETE FROM t WHERE id > 1");
@@ -87,10 +109,13 @@ fn real_wals(h: &Harness) {
     h.create("restart", SCHEMA);
     let db_dir = h.root().join("restart");
     let conn = rusqlite::Connection::open(db_dir.join("live.db")).unwrap();
-    conn.execute_batch("INSERT INTO t(v) VALUES(replace(hex(zeroblob(9000)),'0','g'))").unwrap();
+    conn.execute_batch("INSERT INTO t(v) VALUES(replace(hex(zeroblob(9000)),'0','g'))")
+        .unwrap();
     write_wal("real-restart-gen1", &read_live_wal(&db_dir), 4096);
-    conn.execute_batch("PRAGMA wal_checkpoint(RESTART)").unwrap();
-    conn.execute_batch("INSERT INTO t(v) VALUES('gen2')").unwrap();
+    conn.execute_batch("PRAGMA wal_checkpoint(RESTART)")
+        .unwrap();
+    conn.execute_batch("INSERT INTO t(v) VALUES('gen2')")
+        .unwrap();
     write_wal("real-restart-two-gens", &read_live_wal(&db_dir), 4096);
     drop(conn);
 }
@@ -111,8 +136,9 @@ fn encoded_wals() {
                         let frames = (0..=c as u32)
                             .map(|k| {
                                 let seed = (c * 7 + k as usize) as u8;
-                                let page: Vec<u8> =
-                                    (0..page_size as usize).map(|i| (i as u8).wrapping_mul(seed | 1)).collect();
+                                let page: Vec<u8> = (0..page_size as usize)
+                                    .map(|i| (i as u8).wrapping_mul(seed | 1))
+                                    .collect();
                                 (k + 1, page)
                             })
                             .collect();
