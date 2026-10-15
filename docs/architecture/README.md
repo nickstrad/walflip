@@ -12,23 +12,28 @@ the code on 2026-10-14 and carries source links (`src/*.rs`, `tests/`, `fuzz/`, 
 |---|---|---|
 | `context` | context | Who uses walflip, and which outside things does it touch? (operator, CI/fuzzer, local disk, other writers, SQLite clients) |
 | `containers-runtime` | container | Which parts run, and which data stores do they use? (CLI binary, library crate, `live.db`, `live.db-wal`, `base.db`, `meta.db` in the per-database folder, clone file) |
-| `containers-verification` | container | What do the tests and the fuzzer run? (in-crate tests, `tests/roundtrip.rs`, `tests/cli.rs` + `tests/common`, the `walflip-fuzz` crate, the seed script) |
+| `containers-verification` | container | What do the tests and the fuzzer run? (in-crate tests, `tests/roundtrip.rs`, the scenario suites + `tests/common`, the `walflip-fuzz` crate with six targets, the seed script) |
 | `components` | component | What modules make up the library? Where is the line between pure code and I/O, and which way do the dependencies point? |
-| `code-wal` | code | Which symbols make up the WAL parser, and what is behind the `testing` feature? |
-| `code-store` | code | What are `Store`, the cursor rule and the `meta.db` tables (`meta`, `commits`, `frames`)? |
+| `code-wal` | code | Which symbols make up the WAL parser (`parse`, `parse_from`, `Resume`), and what is behind the `testing` feature? |
+| `code-store` | code | What are `Store`, `WriteLock`, the cursor rule and the `meta.db` tables (`meta`, `commits`, `frames`)? |
 | `dyn-create` | dynamic | What happens during `create NAME --schema FILE`? |
-| `dyn-exec` | dynamic | What happens during `exec`: the WAL parse and the idempotent cursor capture? |
+| `dyn-exec` | dynamic | What happens during `exec`: the two write locks, `(recovered)` capture, the VACUUM path and incremental capture from the resume state? |
 | `dyn-clone` | dynamic | What happens during `clone -n N`: the replay, the `max_pages` bound and the `db_pages` resize? |
 | `dyn-inspect` | dynamic | What do `list`, `status` and `log` read? |
-| `deploy-dev` | deployment | How is walflip built and run on a developer machine? (`cargo install`, make targets, nightly fuzz) |
-| `deploy-ci` | deployment (planned) | Which CI jobs does `docs/TESTING_PLAN.md` plan? None exist yet. |
+| `deploy-dev` | deployment | How is walflip built and run on a developer machine? (`cargo install`, make targets, local fuzzing) |
+| `deploy-ci` | deployment | What does CI run? `ci.yml` on GitHub Actions: `cargo test --features testing` on PRs and pushes to `main`. The fuzz workflows are archived. |
 
 Suggested reading order: context, then runtime containers, components, the four dynamic views,
 and last the code and deployment views. The explanation panel holds a plain text and a draft
 STE100 text for each diagram. The design decisions and the known gaps are in the documents
-"Architecture decisions and constraints" and "Known gaps". Open them from the context or
-components diagram. The known gaps B1-B8 are as reported by `docs/TESTING_PLAN.md`. This
-documentation did not re-verify them.
+"Architecture decisions and constraints" and "Known limits and fixed defects". Open them from the context or
+components diagram. The defects B1-B10 are all fixed (see `docs/WAVE_STATUS.md`); the "Known limits" document lists what remains by design.
+
+## Published site
+
+The viewer is built and published to GitHub Pages by `.github/workflows/pages.yml` on every push to
+`main` that touches `docs/architecture/`: <https://nickstrad.github.io/walflip/>. In the repository
+settings, Pages must use the source "GitHub Actions".
 
 ## Run
 

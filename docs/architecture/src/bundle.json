@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "walflip",
   "title": "walflip architecture",
-  "revision": "2026-10-14",
+  "revision": "2026-10-15",
   "defaultDiagramId": "context",
   "model": {
     "elements": [
@@ -29,12 +29,13 @@
         "docIds": [],
         "sourceIds": [
           "src-make",
-          "src-plan"
+          "src-ci",
+          "src-status"
         ],
         "id": "ci-operator",
         "kind": "person",
         "name": "CI job or fuzzer operator",
-        "description": "Secondary consumer. Runs cargo test and cargo +nightly fuzz. No CI workflow file exists in the repo yet."
+        "description": "Secondary consumer. GitHub Actions runs cargo test on pull requests and pushes to main. Fuzzing (cargo +nightly fuzz) is run locally; the fuzz workflows are archived."
       },
       {
         "status": "existing",
@@ -153,7 +154,7 @@
         "kind": "container",
         "parentId": "walflip",
         "name": "walflip library crate",
-        "description": "Modules wal, replay, store and db. Returns plain data; never prints. Also linked directly by the test suites and the fuzz crate.",
+        "description": "Modules wal, replay, store and db. Returns plain data; never prints. Also linked directly by the test suites and the fuzz crate (feature testing).",
         "technology": "Rust, rusqlite 0.32 (bundled), anyhow"
       },
       {
@@ -171,7 +172,7 @@
         "containerType": "datastore",
         "parentId": "walflip",
         "name": "live.db",
-        "description": "The database you write to, in WAL journal mode. Only walflip exec may write it.",
+        "description": "The database you write to, in WAL journal mode. Only walflip exec may write it. exec installs an authorizer that denies ATTACH, DETACH and PRAGMA journal_mode, and transaction control inside a statement.",
         "technology": "SQLite, journal_mode=WAL"
       },
       {
@@ -211,7 +212,7 @@
         "containerType": "datastore",
         "parentId": "walflip",
         "name": "base.db",
-        "description": "Snapshot copied from live.db at create, after the schema ran and the WAL was checkpointed. clone -n 0 returns it.",
+        "description": "Snapshot copied from live.db at create: the schema runs first in rollback mode, then WAL is enabled and checkpointed. clone -n 0 returns it.",
         "technology": "SQLite file (byte copy)"
       },
       {
@@ -231,7 +232,7 @@
         "containerType": "datastore",
         "parentId": "walflip",
         "name": "meta.db",
-        "description": "History store: tables meta (page_size, cursor_salt, cursor_commits), commits and frames (full page images).",
+        "description": "History store: tables meta (page_size, cursor_salt, cursor_commits, cursor_resume), commits and frames (full page images). Its BEGIN IMMEDIATE lock serialises concurrent exec.",
         "technology": "SQLite: meta, commits, frames"
       },
       {
@@ -247,7 +248,7 @@
         "containerType": "datastore",
         "parentId": "walflip",
         "name": "Clone output file",
-        "description": "Database as of commit N at the -o path. walflip refuses to overwrite an existing file.",
+        "description": "Database as of commit N at the -o path. walflip refuses to overwrite an existing file (opened with create_new).",
         "technology": "SQLite file, std::fs::write"
       },
       {
@@ -281,7 +282,7 @@
         "parentId": "walflip",
         "name": "tests/roundtrip.rs",
         "description": "Random insert/update/delete sequences on a real database; asserts clone -n k equals live contents after step k, single-WAL batches and idempotent capture.",
-        "technology": "proptest (24 cases), tempfile; links the library"
+        "technology": "proptest, tempfile; links the library"
       },
       {
         "status": "existing",
@@ -290,6 +291,10 @@
         "docIds": [],
         "sourceIds": [
           "src-tests-cli",
+          "src-tests-scenarios",
+          "src-tests-library",
+          "src-tests-perf",
+          "src-tests-fuzzseed",
           "src-tests-common",
           "src-tests-invariants",
           "src-tests-model"
@@ -297,27 +302,26 @@
         "id": "cli-tests",
         "kind": "container",
         "parentId": "walflip",
-        "name": "tests/cli.rs + tests/common",
-        "description": "End-to-end scenarios that spawn the compiled binary through Harness, compare against a shadow SQLite Model and check the invariant catalog through the library.",
+        "name": "Scenario suites: tests/*.rs + tests/common",
+        "description": "Scenarios S1-S20 that spawn the compiled binary through Harness (cli, scenarios_core/usage/ddl/schema/failure/concurrency), library-level scenarios (library.rs), a perf smoke test and a fuzz-seed generator. Results are compared with a shadow SQLite Model and the invariant catalog (INV-xx) is checked through the library.",
         "technology": "std::process::Command, CARGO_BIN_EXE_walflip, rusqlite"
       },
       {
-        "status": "mixed",
+        "status": "existing",
         "tags": [],
-        "plannedNotes": [
-          "Planned by TESTING_PLAN.md section 2.1, not present: wal_differential, replay_apply, store_capture and statements_split targets, plus fuzz/wal.dict."
-        ],
+        "plannedNotes": [],
         "docIds": [],
         "sourceIds": [
           "src-fuzz",
+          "src-fuzz-exec",
           "src-fuzz-cargo",
-          "src-plan"
+          "src-fuzz-readme"
         ],
         "id": "fuzz",
         "kind": "container",
         "parentId": "walflip",
         "name": "walflip-fuzz crate",
-        "description": "cargo-fuzz crate with one target, wal_parse: raw bytes into wal::parse, asserting no panic and internal consistency. Seeded corpus in fuzz/corpus/wal_parse.",
+        "description": "cargo-fuzz crate with six targets: wal_parse, wal_differential (against the reference encoder), replay_apply, store_capture, statements_split and exec_sql (structured SQL programs through the real create/exec, with a testing-only sandbox). Minimised corpora in fuzz/corpus, dictionary fuzz/wal.dict.",
         "technology": "libfuzzer-sys 0.4, Rust nightly, walflip feature testing"
       },
       {
@@ -334,7 +338,7 @@
         "kind": "container",
         "parentId": "walflip",
         "name": "scripts/seed.sh + examples/processes.sql",
-        "description": "Demo tooling. Samples ps twice, generates 250 INSERT, 150 UPDATE and 100 DELETE statements, and feeds them to the binary. Fails unless status reports 500 commits.",
+        "description": "Demo tooling. Samples ps twice, generates 250 INSERT, 150 UPDATE and 100 DELETE statements, and feeds them to the binary. Fails unless status reports 500 commits. fuzz-seed.sh regenerates the fuzz corpus seeds.",
         "technology": "bash, awk, ps"
       },
       {
@@ -353,7 +357,7 @@
         "kind": "component",
         "parentId": "lib",
         "name": "db",
-        "description": "I/O shell. Db paths and name validation, parse_statements, create, list, rename, drop_db, exec, log, status, clone_at, summarize. Returns structs; never prints.",
+        "description": "I/O shell. Db paths and name validation, parse_statements and split_script, create (schema in rollback mode, then WAL), list, rename, drop_db, exec_with (history lock, live lock, recovery capture, authorizer, VACUUM path), log, status, clone_at, summarize. Returns structs; never prints.",
         "technology": "Rust module, rusqlite, std::fs"
       },
       {
@@ -372,7 +376,7 @@
         "kind": "component",
         "parentId": "lib",
         "name": "store",
-        "description": "I/O shell around meta.db. Store::open creates the schema; capture reads the WAL file, parses it and inserts new commits atomically. Contains the pure function commits_seen.",
+        "description": "I/O shell around meta.db. Store::open creates the schema; open_existing does not. lock takes the history write lock (BEGIN IMMEDIATE); capture reads only the new WAL tail from the stored resume state, parses it and inserts new commits in a savepoint. Contains the pure function commits_seen.",
         "technology": "Rust module, rusqlite, std::fs"
       },
       {
@@ -391,7 +395,7 @@
         "kind": "component",
         "parentId": "lib",
         "name": "wal",
-        "description": "Pure WAL parser: header, byte order, salts, chained checksums, commit grouping. Borrows pages from the input buffer. Reference encoder behind cfg(test) or feature testing.",
+        "description": "Pure WAL parser: header, byte order, salts, chained checksums, commit grouping, and resumable parsing (Resume, parse_from). Borrows pages from the input buffer. Reference encoder behind cfg(test) or feature testing.",
         "technology": "Rust module, no I/O"
       },
       {
@@ -426,7 +430,7 @@
         "kind": "component",
         "parentId": "cli",
         "name": "main.rs (clap layer)",
-        "description": "Cli and Cmd clap types, main dispatch, read_schema (file or stdin) and report. Output formatting only. Shown as a supporting component from the CLI container.",
+        "description": "Cli and Cmd clap types, main dispatch, read_sql (file or stdin) and report. Handles exec SQL, exec - and exec --script, and log --limit/--head/--all. Output formatting only. Shown as a supporting component from the CLI container.",
         "technology": "Rust, clap 4 derive, anyhow"
       },
       {
@@ -442,7 +446,7 @@
         "parentId": "c-wal",
         "symbolKind": "function",
         "name": "parse",
-        "description": "Returns Ok(None) for a short buffer or bad header checksum, Err for bad magic or page size, else the committed prefix.",
+        "description": "Returns Ok(None) for a short buffer or bad header checksum, Err for bad magic or a page size that is not a power of two in 512..=65536, else the committed prefix.",
         "members": [
           {
             "name": "parse",
@@ -498,6 +502,72 @@
           {
             "name": "commits",
             "signature": "Vec<Commit<'a>>"
+          },
+          {
+            "name": "end",
+            "signature": "Resume (where parsing can continue)"
+          }
+        ]
+      },
+      {
+        "status": "existing",
+        "tags": [],
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-wal"
+        ],
+        "id": "k-wal-parse-from",
+        "kind": "code",
+        "parentId": "c-wal",
+        "symbolKind": "function",
+        "name": "parse_from",
+        "description": "Continues a parse from a stored Resume state with only the tail of the file. Returns None when the state does not fit, so the caller parses the whole file.",
+        "members": [
+          {
+            "name": "parse_from",
+            "signature": "pub fn parse_from<'a>(header: &[u8], tail: &'a [u8], from: &Resume) -> Option<Wal<'a>>"
+          }
+        ]
+      },
+      {
+        "status": "existing",
+        "tags": [],
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-wal"
+        ],
+        "id": "k-wal-resume",
+        "kind": "code",
+        "parentId": "c-wal",
+        "symbolKind": "type",
+        "name": "Resume",
+        "description": "Parser state at a commit boundary: the 32-byte header, file offset, running checksum and commit count. Stored in meta.db under cursor_resume (text form v1).",
+        "members": [
+          {
+            "name": "header",
+            "signature": "[u8; 32]"
+          },
+          {
+            "name": "offset",
+            "signature": "u64"
+          },
+          {
+            "name": "cksum",
+            "signature": "(u32, u32)"
+          },
+          {
+            "name": "commits",
+            "signature": "u64"
+          },
+          {
+            "name": "tail_start",
+            "signature": "pub fn tail_start(&self) -> u64"
+          },
+          {
+            "name": "to_meta / from_meta",
+            "signature": "text round trip"
           }
         ]
       },
@@ -591,8 +661,12 @@
         "description": "Owns the meta.db connection.",
         "members": [
           {
-            "name": "open",
-            "signature": "pub fn open(path: &Path) -> Result<Self>"
+            "name": "open / open_with_timeout",
+            "signature": "pub fn open(path: &Path) -> Result<Self>  (creates the schema)"
+          },
+          {
+            "name": "open_existing",
+            "signature": "pub fn open_existing(path: &Path) -> Result<Self>  (no create, no schema)"
           },
           {
             "name": "get / set",
@@ -607,12 +681,45 @@
             "signature": "pub fn commit_count(&self) -> Result<u64>"
           },
           {
+            "name": "uncaptured",
+            "signature": "pub fn uncaptured(&self, wal_path: &Path) -> Result<u64>"
+          },
+          {
+            "name": "lock",
+            "signature": "pub fn lock(&mut self) -> Result<WriteLock<'_>>"
+          },
+          {
             "name": "capture",
             "signature": "pub fn capture(&mut self, wal_path: &Path, label: &str) -> Result<usize>"
           },
           {
             "name": "conn",
             "signature": "pub fn conn(&self) -> &Connection"
+          }
+        ]
+      },
+      {
+        "status": "existing",
+        "tags": [],
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-store"
+        ],
+        "id": "k-writelock",
+        "kind": "code",
+        "parentId": "c-store",
+        "symbolKind": "class",
+        "name": "WriteLock",
+        "description": "The history write lock: an open BEGIN IMMEDIATE on meta.db. capture runs inside it in a savepoint; commit releases it; drop without commit rolls back.",
+        "members": [
+          {
+            "name": "capture",
+            "signature": "pub fn capture(&self, wal_path: &Path, label: &str) -> Result<Captured>"
+          },
+          {
+            "name": "commit",
+            "signature": "pub fn commit(self) -> Result<()>"
           }
         ]
       },
@@ -652,7 +759,7 @@
         "parentId": "c-store",
         "symbolKind": "table",
         "name": "meta",
-        "description": "Key-value facts. Keys used: page_size, cursor_salt (salt1:salt2), cursor_commits.",
+        "description": "Key-value facts. Keys used: page_size, cursor_salt (salt1:salt2), cursor_commits, cursor_resume (Resume text form; used only while it agrees with salt and count).",
         "members": [
           {
             "name": "key",
@@ -746,7 +853,7 @@
         "id": "dn-host",
         "kind": "deploymentNode",
         "name": "Developer machine",
-        "description": "Unix-like OS with a Rust toolchain 1.75+. SQLite is bundled, so no system SQLite is needed.",
+        "description": "Unix-like OS with a Rust toolchain 1.85+ (tests need 1.88+). SQLite is bundled, so no system SQLite is needed.",
         "technology": "macOS or Linux, cargo",
         "environment": "developer-machine"
       },
@@ -830,7 +937,7 @@
         "kind": "infrastructureNode",
         "parentId": "dn-host",
         "name": "Makefile targets",
-        "description": "build, test, fuzz (FUZZ_SECS, default 30), seed, demo, clean, distclean.",
+        "description": "build, test, fuzz (FUZZ_SECS, default 30), fuzz-replay, seed, demo, clean, distclean.",
         "technology": "make"
       },
       {
@@ -981,7 +1088,7 @@
         "id": "dn-nightly",
         "kind": "deploymentNode",
         "name": "Rust nightly + cargo-fuzz",
-        "description": "Needed only for make fuzz. Build output in fuzz/target, crashes in fuzz/artifacts (both ignored by git).",
+        "description": "Needed only for make fuzz and make fuzz-replay. Build output in fuzz/target, crashes in fuzz/artifacts (both ignored by git).",
         "technology": "cargo +nightly fuzz",
         "environment": "developer-machine",
         "parentId": "dn-host"
@@ -997,81 +1104,59 @@
         ],
         "id": "i-fuzz",
         "kind": "instance",
-        "name": "wal_parse fuzz target",
-        "description": "Runs with -max_total_time=FUZZ_SECS.",
+        "name": "Six fuzz targets",
+        "description": "make fuzz runs each with -max_total_time=FUZZ_SECS; make fuzz-replay replays the committed corpora once.",
         "instanceOf": "fuzz",
         "parentId": "dn-nightly",
         "environment": "developer-machine"
       },
       {
-        "status": "planned",
+        "status": "existing",
         "tags": [],
-        "plannedNotes": [
-          "Planned in TESTING_PLAN.md section 2.4. The repository has no CI workflow file yet."
-        ],
+        "plannedNotes": [],
         "docIds": [],
         "sourceIds": [
-          "src-plan"
+          "src-ci"
         ],
+        "environment": "ci-github",
         "id": "dn-ci",
         "kind": "deploymentNode",
-        "name": "CI runner (planned)",
-        "description": "Planned runner for PR and nightly jobs.",
-        "technology": "Unspecified CI, Rust stable + nightly",
-        "environment": "ci-planned"
+        "name": "GitHub Actions runner",
+        "description": "Job test on ubuntu-24.04 (pinned; ubuntu-latest moves to Ubuntu 26 on 2026-10-19). Steps: checkout, stable Rust, rust-cache, cargo test.",
+        "technology": "GitHub Actions, Rust stable"
       },
       {
-        "status": "planned",
+        "status": "existing",
         "tags": [],
-        "plannedNotes": [
-          "Planned in TESTING_PLAN.md section 2.4. The repository has no CI workflow file yet."
-        ],
+        "plannedNotes": [],
         "docIds": [],
         "sourceIds": [
-          "src-plan"
+          "src-ci",
+          "src-ci-archive",
+          "src-status"
         ],
-        "id": "infra-ci-schedule",
+        "id": "infra-ci-trigger",
         "kind": "infrastructureNode",
         "parentId": "dn-ci",
-        "name": "Nightly and PR triggers (planned)",
-        "description": "Nightly: each fuzz target for 300 s with -rss_limit_mb=1024. PR: cargo fuzz build and corpus replay with -runs=0.",
-        "technology": "CI scheduler"
+        "name": "ci.yml triggers",
+        "description": "pull_request and push to main. No fuzz job: the nightly fuzz and the PR fuzz build + corpus replay workflows are archived in archive/ci/.",
+        "technology": "GitHub Actions workflow"
       },
       {
-        "status": "planned",
+        "status": "existing",
         "tags": [],
-        "plannedNotes": [
-          "Planned in TESTING_PLAN.md section 2.4. The repository has no CI workflow file yet."
-        ],
+        "plannedNotes": [],
         "docIds": [],
         "sourceIds": [
-          "src-plan"
+          "src-ci"
         ],
-        "id": "i-ci-fuzz",
-        "kind": "instance",
-        "parentId": "dn-ci",
-        "instanceOf": "fuzz",
-        "environment": "ci-planned",
-        "name": "Fuzz targets (planned job)",
-        "description": "wal_parse today; more targets planned."
-      },
-      {
-        "status": "planned",
-        "tags": [],
-        "plannedNotes": [
-          "Planned in TESTING_PLAN.md section 2.4. The repository has no CI workflow file yet."
-        ],
-        "docIds": [],
-        "sourceIds": [
-          "src-plan"
-        ],
+        "environment": "ci-github",
         "id": "i-ci-tests",
         "kind": "instance",
         "parentId": "dn-ci",
         "instanceOf": "cli-tests",
-        "environment": "ci-planned",
-        "name": "cargo test (planned job)",
-        "description": "Unit, property, round-trip and end-to-end suites."
+        "name": "cargo test --features testing",
+        "description": "Unit, property, round-trip and scenario suites (about 155 tests)."
       }
     ],
     "relationships": [
@@ -1092,7 +1177,7 @@
         "id": "ctx-ci-wf",
         "sourceId": "ci-operator",
         "targetId": "walflip",
-        "label": "Runs tests and fuzzing",
+        "label": "Runs tests (CI) and fuzzing (local)",
         "technology": "cargo test, cargo +nightly fuzz",
         "status": "existing",
         "plannedNotes": [],
@@ -1170,7 +1255,7 @@
         "id": "lib-live",
         "sourceId": "lib",
         "targetId": "live-db",
-        "label": "Runs each statement as one transaction, autocheckpoint off",
+        "label": "Runs each statement as one transaction under the history and live write locks, autocheckpoint off",
         "technology": "rusqlite Connection",
         "status": "existing",
         "plannedNotes": [],
@@ -1183,8 +1268,8 @@
         "id": "lib-wal",
         "sourceId": "lib",
         "targetId": "live-wal",
-        "label": "Reads raw WAL bytes after each commit",
-        "technology": "std::fs::read",
+        "label": "Reads the new WAL bytes after each commit",
+        "technology": "std::fs::File read from the stored offset",
         "status": "existing",
         "plannedNotes": [],
         "docIds": [],
@@ -1209,7 +1294,7 @@
         "id": "lib-meta",
         "sourceId": "lib",
         "targetId": "meta-db",
-        "label": "Stores commits, frames and cursor; reads them back",
+        "label": "Stores commits, frames and cursor; takes the history write lock; reads them back",
         "technology": "rusqlite, SQL",
         "status": "existing",
         "plannedNotes": [],
@@ -1314,8 +1399,8 @@
         "id": "ci-fuzz",
         "sourceId": "ci-operator",
         "targetId": "fuzz",
-        "label": "Runs wal_parse for FUZZ_SECS",
-        "technology": "cargo +nightly fuzz run (make fuzz)",
+        "label": "Runs six targets for FUZZ_SECS each",
+        "technology": "cargo +nightly fuzz run (make fuzz, make fuzz-replay)",
         "status": "existing",
         "plannedNotes": [],
         "docIds": [],
@@ -1380,7 +1465,7 @@
         "id": "clitests-lib",
         "sourceId": "cli-tests",
         "targetId": "lib",
-        "label": "Checks invariants via db::list and clone_at; reads meta.db read-only",
+        "label": "Calls the library; checks invariants via db::list and clone_at; reads meta.db read-only",
         "technology": "Rust calls, rusqlite immutable=1",
         "status": "existing",
         "plannedNotes": [],
@@ -1393,7 +1478,7 @@
         "id": "clitests-seed",
         "sourceId": "cli-tests",
         "targetId": "seed-script",
-        "label": "Runs the seed script (scenario 11)",
+        "label": "Runs the seed script",
         "technology": "bash",
         "status": "existing",
         "plannedNotes": [],
@@ -1406,7 +1491,7 @@
         "id": "fuzz-lib",
         "sourceId": "fuzz",
         "targetId": "lib",
-        "label": "Feeds raw bytes to wal::parse",
+        "label": "Feeds bytes and structured programs to wal, replay, store and db",
         "technology": "libFuzzer, feature testing",
         "status": "existing",
         "plannedNotes": [],
@@ -1458,7 +1543,7 @@
         "id": "main-db",
         "sourceId": "c-main",
         "targetId": "c-db",
-        "label": "Calls operations; receives Created, DbSummary, LogEntry, Status, Summary",
+        "label": "Calls operations; receives Created, DbSummary, ExecReport, LogEntry, Status, Summary",
         "technology": "Rust calls",
         "status": "existing",
         "plannedNotes": [],
@@ -1471,7 +1556,7 @@
         "id": "db-store",
         "sourceId": "c-db",
         "targetId": "c-store",
-        "label": "Opens Store; capture; page_size, commit_count; queries through conn()",
+        "label": "Opens Store; lock; capture; page_size, commit_count, uncaptured; queries through conn()",
         "technology": "Rust calls",
         "status": "existing",
         "plannedNotes": [],
@@ -1498,7 +1583,7 @@
         "id": "store-wal",
         "sourceId": "c-store",
         "targetId": "c-wal",
-        "label": "parse(bytes) -> Option<Wal>",
+        "label": "parse(bytes) or parse_from(header, tail, resume) -> Option<Wal>",
         "technology": "Rust call on &[u8]",
         "status": "existing",
         "plannedNotes": [],
@@ -1511,7 +1596,7 @@
         "id": "db-sqlite",
         "sourceId": "c-db",
         "targetId": "sqlite-engine",
-        "label": "Opens live.db, runs statements, checkpoint at create, integrity_check",
+        "label": "Opens live.db with an authorizer, runs statements, VACUUM, checkpoint at create, integrity_check",
         "technology": "rusqlite",
         "status": "existing",
         "plannedNotes": [],
@@ -1524,7 +1609,7 @@
         "id": "store-sqlite",
         "sourceId": "c-store",
         "targetId": "sqlite-engine",
-        "label": "Reads and writes meta.db in one transaction per capture",
+        "label": "Reads and writes meta.db; one write-lock transaction per statement",
         "technology": "rusqlite",
         "status": "existing",
         "plannedNotes": [],
@@ -1537,8 +1622,8 @@
         "id": "store-fs",
         "sourceId": "c-store",
         "targetId": "host-fs",
-        "label": "Reads live.db-wal bytes",
-        "technology": "std::fs::read",
+        "label": "Reads live.db-wal header and tail",
+        "technology": "std::fs::File read",
         "status": "existing",
         "plannedNotes": [],
         "docIds": [],
@@ -1602,7 +1687,7 @@
         "id": "db-livewal",
         "sourceId": "c-db",
         "targetId": "live-wal",
-        "label": "Reports WAL size",
+        "label": "Reports WAL size; wal_mark for change detection",
         "technology": "std::fs::metadata",
         "status": "existing",
         "plannedNotes": [],
@@ -1628,8 +1713,8 @@
         "id": "store-livewal",
         "sourceId": "c-store",
         "targetId": "live-wal",
-        "label": "Reads WAL bytes",
-        "technology": "std::fs::read",
+        "label": "Reads WAL header and tail",
+        "technology": "std::fs::File read",
         "status": "existing",
         "plannedNotes": [],
         "docIds": [],
@@ -1695,6 +1780,51 @@
         "sourceIds": []
       },
       {
+        "id": "k-parsefrom-checksum",
+        "sourceId": "k-wal-parse-from",
+        "targetId": "k-wal-checksum",
+        "label": "Verifies chained checksums from the stored one",
+        "technology": "function call",
+        "status": "existing",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": []
+      },
+      {
+        "id": "k-parsefrom-wal",
+        "sourceId": "k-wal-parse-from",
+        "targetId": "k-wal-wal",
+        "label": "Returns only commits after the resume point",
+        "technology": "Option<Wal>",
+        "status": "existing",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": []
+      },
+      {
+        "id": "k-wal-end",
+        "sourceId": "k-wal-wal",
+        "targetId": "k-wal-resume",
+        "label": "end: where the next parse can start",
+        "technology": "field",
+        "status": "existing",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [],
+        "kind": "composition"
+      },
+      {
+        "id": "k-parsefrom-resume",
+        "sourceId": "k-wal-parse-from",
+        "targetId": "k-wal-resume",
+        "label": "Starts from",
+        "technology": "function argument",
+        "status": "existing",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": []
+      },
+      {
         "id": "k-store-seen",
         "sourceId": "k-store",
         "targetId": "k-commits-seen",
@@ -1739,6 +1869,28 @@
         "sourceIds": []
       },
       {
+        "id": "k-store-lock",
+        "sourceId": "k-store",
+        "targetId": "k-writelock",
+        "label": "lock() returns it",
+        "technology": "BEGIN IMMEDIATE",
+        "status": "existing",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": []
+      },
+      {
+        "id": "k-lock-meta",
+        "sourceId": "k-writelock",
+        "targetId": "k-t-meta",
+        "label": "Capture advances cursor_salt, cursor_commits, cursor_resume",
+        "technology": "SQL",
+        "status": "existing",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": []
+      },
+      {
         "id": "k-frames-commits",
         "sourceId": "k-t-frames",
         "targetId": "k-t-commits",
@@ -1765,8 +1917,8 @@
         "id": "d-make-fuzz",
         "sourceId": "infra-make",
         "targetId": "i-fuzz",
-        "label": "make fuzz",
-        "technology": "cargo +nightly fuzz run wal_parse",
+        "label": "make fuzz / make fuzz-replay",
+        "technology": "cargo +nightly fuzz run, each target",
         "status": "existing",
         "plannedNotes": [],
         "docIds": [],
@@ -1839,33 +1991,16 @@
         "sourceIds": []
       },
       {
-        "id": "d-ci-fuzz",
-        "sourceId": "infra-ci-schedule",
-        "targetId": "i-ci-fuzz",
-        "label": "Nightly fuzz run (planned)",
-        "technology": "cargo +nightly fuzz run, 300 s per target",
-        "status": "planned",
-        "plannedNotes": [
-          "TESTING_PLAN.md section 2.4"
-        ],
-        "docIds": [],
-        "sourceIds": [
-          "src-plan"
-        ]
-      },
-      {
         "id": "d-ci-tests",
-        "sourceId": "infra-ci-schedule",
+        "sourceId": "infra-ci-trigger",
         "targetId": "i-ci-tests",
-        "label": "PR test run (planned)",
-        "technology": "cargo test",
-        "status": "planned",
-        "plannedNotes": [
-          "TESTING_PLAN.md section 2.4"
-        ],
+        "label": "Runs on every pull request and push to main",
+        "technology": "cargo test --features testing",
+        "status": "existing",
+        "plannedNotes": [],
         "docIds": [],
         "sourceIds": [
-          "src-plan"
+          "src-ci"
         ]
       }
     ]
@@ -2185,7 +2320,7 @@
         },
         {
           "diagramId": "deploy-ci",
-          "label": "Planned CI deployment"
+          "label": "CI deployment"
         }
       ],
       "nodes": [
@@ -2282,16 +2417,6 @@
             }
           },
           {
-            "id": "dashed",
-            "label": "Planned or partly planned",
-            "description": "Not fully present in the code today; see the planned notes",
-            "swatch": {
-              "shape": "box",
-              "tone": "muted",
-              "stroke": "dashed"
-            }
-          },
-          {
             "id": "forward",
             "label": "Relationship",
             "description": "Arrow points from the caller to the supplier; the label gives intent and mechanism",
@@ -2313,7 +2438,9 @@
       ],
       "sourceIds": [
         "src-tests-cli",
+        "src-tests-scenarios",
         "src-fuzz",
+        "src-fuzz-exec",
         "src-plan"
       ]
     },
@@ -2513,6 +2640,9 @@
           "elementId": "k-wal-parse"
         },
         {
+          "elementId": "k-wal-parse-from"
+        },
+        {
           "elementId": "k-wal-checksum"
         },
         {
@@ -2523,6 +2653,9 @@
         },
         {
           "elementId": "k-wal-frame"
+        },
+        {
+          "elementId": "k-wal-resume"
         },
         {
           "elementId": "k-wal-encode"
@@ -2543,6 +2676,18 @@
         },
         {
           "relationshipId": "k-encode-checksum"
+        },
+        {
+          "relationshipId": "k-parsefrom-checksum"
+        },
+        {
+          "relationshipId": "k-parsefrom-wal"
+        },
+        {
+          "relationshipId": "k-wal-end"
+        },
+        {
+          "relationshipId": "k-parsefrom-resume"
         }
       ],
       "legend": {
@@ -2597,6 +2742,9 @@
           "elementId": "k-store"
         },
         {
+          "elementId": "k-writelock"
+        },
+        {
           "elementId": "k-commits-seen"
         },
         {
@@ -2610,6 +2758,12 @@
         }
       ],
       "edges": [
+        {
+          "relationshipId": "k-store-lock"
+        },
+        {
+          "relationshipId": "k-lock-meta"
+        },
         {
           "relationshipId": "k-store-seen"
         },
@@ -2746,7 +2900,7 @@
             "id": "cr-3",
             "relationshipId": "main-fs",
             "direction": "forward",
-            "label": "read_schema: read FILE, or stdin when FILE is -"
+            "label": "read_sql: read FILE, or stdin when FILE is -"
           },
           {
             "kind": "interaction",
@@ -2767,21 +2921,21 @@
             "id": "cr-6",
             "relationshipId": "db-live",
             "direction": "forward",
-            "label": "Open live.db; PRAGMA journal_mode=WAL; fail unless it returns wal"
+            "label": "Open live.db in rollback mode; run the schema with an authorizer (ATTACH, DETACH, PRAGMA journal_mode denied)"
           },
           {
             "kind": "interaction",
             "id": "cr-7",
             "relationshipId": "db-live",
             "direction": "forward",
-            "label": "execute_batch(schema); any error removes the whole folder"
+            "label": "Fail if the schema left a transaction open; any error removes the whole folder"
           },
           {
             "kind": "interaction",
             "id": "cr-8",
             "relationshipId": "db-live",
             "direction": "forward",
-            "label": "PRAGMA wal_checkpoint(TRUNCATE); read PRAGMA page_size; close"
+            "label": "PRAGMA journal_mode=WAL (must return wal); wal_checkpoint(TRUNCATE); read page_size; close"
           },
           {
             "kind": "interaction",
@@ -2902,7 +3056,7 @@
     {
       "id": "dyn-exec",
       "kind": "dynamic",
-      "title": "Dynamic: exec with WAL parse and idempotent capture",
+      "title": "Dynamic: exec with locks, recovery and incremental capture",
       "status": "existing",
       "parent": {
         "diagramId": "components"
@@ -2947,6 +3101,9 @@
           "relationshipId": "db-live"
         },
         {
+          "relationshipId": "store-meta"
+        },
+        {
           "relationshipId": "live-appends-wal"
         },
         {
@@ -2954,9 +3111,6 @@
         },
         {
           "relationshipId": "store-wal"
-        },
-        {
-          "relationshipId": "store-meta"
         }
       ],
       "scenario": {
@@ -2968,35 +3122,35 @@
             "id": "ex-1",
             "relationshipId": "op-main",
             "direction": "forward",
-            "label": "walflip --db NAME exec SQL, or exec - with one statement per line"
+            "label": "walflip --db NAME exec SQL, exec - (one statement per line) or exec --script FILE (split like the sqlite3 shell)"
           },
           {
             "kind": "interaction",
             "id": "ex-2",
             "relationshipId": "main-db",
             "direction": "forward",
-            "label": "Db::existing: fail unless live.db exists; parse_statements for stdin"
+            "label": "Db::existing: fail unless live.db exists; parse_statements or split_script"
           },
           {
             "kind": "interaction",
             "id": "ex-3",
             "relationshipId": "main-db",
             "direction": "forward",
-            "label": "db::exec(&d, &statements)"
+            "label": "db::exec_with(&d, &statements, busy timeout)"
           },
           {
             "kind": "interaction",
             "id": "ex-4",
             "relationshipId": "db-store",
             "direction": "forward",
-            "label": "Store::open(meta.db)"
+            "label": "Store::open_with_timeout(meta.db)"
           },
           {
             "kind": "interaction",
             "id": "ex-5",
             "relationshipId": "db-live",
             "direction": "forward",
-            "label": "Open live.db; PRAGMA wal_autocheckpoint=0"
+            "label": "Open live.db; assert WAL mode; install authorizer; PRAGMA wal_autocheckpoint=0"
           },
           {
             "kind": "sequence",
@@ -3005,81 +3159,102 @@
               {
                 "kind": "interaction",
                 "id": "ex-6",
-                "relationshipId": "db-live",
+                "relationshipId": "db-store",
                 "direction": "forward",
-                "label": "For each statement: BEGIN; execute_batch(stmt); COMMIT"
+                "label": "Take the history lock: Store::lock"
               },
               {
                 "kind": "interaction",
                 "id": "ex-7",
+                "relationshipId": "store-meta",
+                "direction": "forward",
+                "label": "BEGIN IMMEDIATE on meta.db (waits up to the busy timeout)"
+              },
+              {
+                "kind": "interaction",
+                "id": "ex-8",
+                "relationshipId": "db-live",
+                "direction": "forward",
+                "label": "BEGIN IMMEDIATE on live.db"
+              },
+              {
+                "kind": "interaction",
+                "id": "ex-9",
+                "relationshipId": "db-store",
+                "direction": "forward",
+                "label": "Recovery: if the WAL changed since our last capture, capture commits nobody recorded as (recovered)"
+              },
+              {
+                "kind": "interaction",
+                "id": "ex-10",
+                "relationshipId": "db-live",
+                "direction": "forward",
+                "label": "Run the statement with transaction control denied; COMMIT. A bare VACUUM takes its own path in autocommit"
+              },
+              {
+                "kind": "interaction",
+                "id": "ex-11",
                 "relationshipId": "live-appends-wal",
                 "direction": "forward",
                 "label": "SQLite appends frames; the last frame carries db_size (commit marker)"
               },
               {
                 "kind": "interaction",
-                "id": "ex-8",
+                "id": "ex-12",
                 "relationshipId": "db-store",
                 "direction": "forward",
-                "label": "capture(wal_path, label = stmt)"
-              },
-              {
-                "kind": "interaction",
-                "id": "ex-9",
-                "relationshipId": "store-livewal",
-                "direction": "forward",
-                "label": "fs::read the whole WAL; a missing file adds 0 commits"
-              },
-              {
-                "kind": "interaction",
-                "id": "ex-10",
-                "relationshipId": "store-wal",
-                "direction": "forward",
-                "label": "wal::parse(bytes)"
-              },
-              {
-                "kind": "interaction",
-                "id": "ex-11",
-                "relationshipId": "store-wal",
-                "direction": "reverse",
-                "label": "Wal { page_size, salt, commits }: stops at a salt or checksum mismatch, drops uncommitted tail"
-              },
-              {
-                "kind": "interaction",
-                "id": "ex-12",
-                "relationshipId": "store-meta",
-                "direction": "forward",
-                "label": "Read page_size, cursor_salt, cursor_commits, count(commits); fail if page sizes differ"
+                "label": "capture(wal_path, label = stmt) inside the open meta.db transaction"
               },
               {
                 "kind": "interaction",
                 "id": "ex-13",
-                "relationshipId": "store-meta",
+                "relationshipId": "store-livewal",
                 "direction": "forward",
-                "label": "One transaction: insert commits after the cursor and their frames; set cursor to salt and total"
+                "label": "Read the 32-byte header and only the tail from the stored resume offset; full read if the header changed"
               },
               {
                 "kind": "interaction",
                 "id": "ex-14",
+                "relationshipId": "store-wal",
+                "direction": "forward",
+                "label": "wal::parse_from(header, tail, resume), or wal::parse(bytes) as the fallback"
+              },
+              {
+                "kind": "interaction",
+                "id": "ex-15",
+                "relationshipId": "store-wal",
+                "direction": "reverse",
+                "label": "Wal { page_size, salt, commits, end }: stops at a salt or checksum mismatch, drops uncommitted tail"
+              },
+              {
+                "kind": "interaction",
+                "id": "ex-16",
+                "relationshipId": "store-meta",
+                "direction": "forward",
+                "label": "In a savepoint: check page_size; insert commits after the cursor and their frames; set cursor_salt, cursor_commits, cursor_resume"
+              },
+              {
+                "kind": "interaction",
+                "id": "ex-17",
                 "relationshipId": "db-store",
                 "direction": "reverse",
-                "label": "Return commits added = total - seen"
+                "label": "Return commits added; COMMIT releases the history lock. More than one commit for one statement is an error"
               }
             ]
           },
           {
             "kind": "interaction",
-            "id": "ex-15",
+            "id": "ex-18",
             "relationshipId": "main-db",
             "direction": "reverse",
-            "label": "Return total captured"
+            "label": "Return ExecReport { captured, recovered }"
           },
           {
             "kind": "interaction",
-            "id": "ex-16",
+            "id": "ex-19",
             "relationshipId": "op-main",
             "direction": "reverse",
-            "label": "Print: captured N commit(s)"
+            "label": "Print: captured N commit(s); warn on stderr if some were (recovered)"
           }
         ]
       },
@@ -3160,7 +3335,8 @@
       "sourceIds": [
         "src-db",
         "src-store",
-        "src-wal"
+        "src-wal",
+        "src-status"
       ]
     },
     {
@@ -3250,7 +3426,7 @@
             "id": "cl-4",
             "relationshipId": "db-store",
             "direction": "forward",
-            "label": "Store::open; commit_count; fail if N > count; require page_size"
+            "label": "Store::open_existing (no create); commit_count; fail if N > count; require page_size"
           },
           {
             "kind": "interaction",
@@ -3292,7 +3468,7 @@
             "id": "cl-10",
             "relationshipId": "db-clone",
             "direction": "forward",
-            "label": "fs::write image to FILE"
+            "label": "Open FILE with create_new (refuse if it exists) and write the image"
           },
           {
             "kind": "interaction",
@@ -3474,14 +3650,14 @@
                 "id": "ls-3",
                 "relationshipId": "db-fs",
                 "direction": "forward",
-                "label": "read_dir(root); keep folders with live.db; missing root gives an empty list"
+                "label": "read_dir(root); keep folders with live.db and meta.db; missing root gives an empty list"
               },
               {
                 "kind": "interaction",
                 "id": "ls-4",
                 "relationshipId": "db-store",
                 "direction": "forward",
-                "label": "Store::open(NAME/meta.db).commit_count()"
+                "label": "Store::open_existing(NAME/meta.db).commit_count()"
               },
               {
                 "kind": "interaction",
@@ -3522,7 +3698,7 @@
                 "id": "st-3",
                 "relationshipId": "db-store",
                 "direction": "forward",
-                "label": "page_size, commit_count, count(frames)"
+                "label": "open_existing; page_size, commit_count, count(frames), uncaptured(wal)"
               },
               {
                 "kind": "interaction",
@@ -3543,7 +3719,7 @@
                 "id": "st-6",
                 "relationshipId": "op-main",
                 "direction": "reverse",
-                "label": "Print page size, commits, frames, live wal"
+                "label": "Print page size, commits, frames, live wal, and uncaptured when WAL commits are not in history"
               }
             ]
           },
@@ -3556,35 +3732,35 @@
                 "id": "lg-1",
                 "relationshipId": "op-main",
                 "direction": "forward",
-                "label": "walflip --db NAME log --limit N (default 20)"
+                "label": "walflip --db NAME log [--limit N (default 20)] [--head | --all]"
               },
               {
                 "kind": "interaction",
                 "id": "lg-2",
                 "relationshipId": "main-db",
                 "direction": "forward",
-                "label": "db::log(&d, N)"
+                "label": "db::log(&d, N, from_end)"
               },
               {
                 "kind": "interaction",
                 "id": "lg-3",
                 "relationshipId": "db-store",
                 "direction": "forward",
-                "label": "Query through Store::conn()"
+                "label": "Store::open_existing; query through conn()"
               },
               {
                 "kind": "interaction",
                 "id": "lg-4",
                 "relationshipId": "store-meta",
                 "direction": "forward",
-                "label": "commits LEFT JOIN frames GROUP BY idx ORDER BY idx LIMIT N"
+                "label": "commits LEFT JOIN frames GROUP BY idx; the last N (or first N), shown oldest first"
               },
               {
                 "kind": "interaction",
                 "id": "lg-5",
                 "relationshipId": "op-main",
                 "direction": "reverse",
-                "label": "Print n, frames, db_pages and the first 90 characters of the SQL"
+                "label": "Print n, frames, db_pages and the label on one line, cut to 90 characters"
               }
             ]
           }
@@ -3680,7 +3856,7 @@
       "related": [
         {
           "diagramId": "deploy-ci",
-          "label": "Planned CI deployment"
+          "label": "CI deployment"
         }
       ],
       "nodes": [
@@ -3810,9 +3986,9 @@
     {
       "id": "deploy-ci",
       "kind": "deployment",
-      "title": "Deployment: CI (planned)",
-      "status": "planned",
-      "environment": "ci-planned",
+      "title": "Deployment: CI (GitHub Actions)",
+      "status": "existing",
+      "environment": "ci-github",
       "parent": {
         "diagramId": "containers-verification"
       },
@@ -3821,19 +3997,13 @@
           "elementId": "dn-ci"
         },
         {
-          "elementId": "infra-ci-schedule"
-        },
-        {
-          "elementId": "i-ci-fuzz"
+          "elementId": "infra-ci-trigger"
         },
         {
           "elementId": "i-ci-tests"
         }
       ],
       "edges": [
-        {
-          "relationshipId": "d-ci-fuzz"
-        },
         {
           "relationshipId": "d-ci-tests"
         }
@@ -3862,16 +4032,6 @@
             }
           },
           {
-            "id": "dashed",
-            "label": "Planned or partly planned",
-            "description": "Not fully present in the code today; see the planned notes",
-            "swatch": {
-              "shape": "box",
-              "tone": "muted",
-              "stroke": "dashed"
-            }
-          },
-          {
             "id": "forward",
             "label": "Relationship",
             "description": "Arrow points from the caller to the supplier; the label gives intent and mechanism",
@@ -3892,7 +4052,9 @@
         "doc-deploy-ci"
       ],
       "sourceIds": [
-        "src-plan"
+        "src-ci",
+        "src-ci-archive",
+        "src-status"
       ]
     }
   ],
@@ -3900,7 +4062,7 @@
     {
       "id": "doc-context",
       "title": "System context",
-      "plain": "walflip is a local command-line tool. It has no server and no background process; each command is one OS process and all state lives under the data root.\n\nThe operator runs every write through `walflip exec`. A CI job or fuzzer operator is a secondary consumer that runs the test suites and the WAL fuzzer.\n\nOther programs that open `live.db` are **not supported**: their writes are not captured, and a checkpoint they cause can discard WAL frames before walflip reads them (README, Limitations).",
+      "plain": "walflip is a local command-line tool. It has no server and no background process; each command is one OS process and all state lives under the data root.\n\nThe operator runs every write through `walflip exec`. A CI job or fuzzer operator is a secondary consumer that runs the test suites and the fuzzers.\n\nOther programs that open `live.db` are **not supported**. Their commits are picked up by the next `exec` as `(recovered)` commits, but a checkpoint they cause can discard WAL frames before walflip reads them (README, Limitations).",
       "ste": {
         "text": "walflip is a local command-line tool. Each command is one process. All data is in the data root.\n\nThe operator must send all writes through walflip exec. Other programs must not write live.db. If they write it, walflip does not record the change.",
         "issue": "ASD-STE100 Issue 9",
@@ -3928,7 +4090,7 @@
     {
       "id": "doc-cli",
       "title": "CLI binary",
-      "plain": "Subcommands: `create NAME [--schema FILE|-]`, `list`, `rename OLD NEW`, `drop NAME`, `exec SQL|-`, `log [--limit N]`, `status`, `clone -n N -o FILE`. Each arm of the `match` in `main` calls one `walflip::db` function and prints its result. After `clone`, `report` calls `db::summarize` and prints `integrity_check` and row counts.",
+      "plain": "Subcommands: `create NAME [--schema FILE|-]`, `list`, `rename OLD NEW`, `drop NAME`, `exec SQL | - | --script FILE`, `log [--limit N] [--head | --all]`, `status`, `clone -n N -o FILE`. Each arm of the `match` in `main` calls one `walflip::db` function and prints its result. `exec` prints a stderr warning when some commits were `(recovered)`. After `clone`, `report` calls `db::summarize` and prints `integrity_check` and row counts.",
       "ste": {
         "text": "The CLI reads the arguments. It calls one library function for each command. It prints the result. It does not contain logic.",
         "issue": "ASD-STE100 Issue 9",
@@ -3957,9 +4119,9 @@
     {
       "id": "doc-containers-verification",
       "title": "Tests, fuzzing and tooling",
-      "plain": "Each suite is a separately runnable target. In-crate `#[cfg(test)]` modules test internals. `tests/roundtrip.rs` links the library and compares clones with live contents. `tests/cli.rs` spawns the compiled binary through `tests/common::Harness`, uses a shadow-SQLite `Model` as oracle and checks the invariant catalog through the library. The fuzz crate depends on walflip with feature `testing` and calls only `wal::parse`. `scripts/seed.sh` drives the binary to build the 500-commit demo; `tests/cli.rs` also runs it.\n\nNo CI workflow exists in the repo. Planned fuzz targets and CI jobs are described in [TESTING_PLAN.md](https://github.com/nickstrad/walflip/blob/main/docs/TESTING_PLAN.md) sections 2.1 and 2.4.",
+      "plain": "Each suite is a separately runnable target. In-crate `#[cfg(test)]` modules test internals. `tests/roundtrip.rs` links the library and compares clones with live contents. `tests/cli.rs` and the `tests/scenarios_*.rs` suites run scenarios S1-S20 through `tests/common`: they spawn the compiled binary, use a shadow-SQLite `Model` as oracle and check the invariant catalog (INV-xx) through the library. `tests/library.rs` has library-level scenarios, `tests/perf.rs` a perf smoke test and `tests/fuzz_seed.rs` the corpus generator.\n\nThe fuzz crate has six targets: `wal_parse`, `wal_differential`, `replay_apply`, `store_capture`, `statements_split` and `exec_sql`. The last one runs structured SQL programs through the real `create` and `exec` with a `testing`-feature sandbox. `scripts/seed.sh` builds the 500-commit demo.\n\nCI runs `cargo test --features testing` only. Fuzzing is local (`make fuzz`, `make fuzz-replay`).",
       "ste": {
-        "text": "Each test suite runs separately. The fuzz crate sends random bytes to wal::parse. The seed script runs the binary to make a demo database.\n\nThe repository has no CI file. The testing plan gives the CI jobs that are planned.",
+        "text": "Each test suite runs separately. The scenario suites run the binary and compare the result with a shadow database. The fuzz crate has six targets.\n\nCI runs cargo test. Fuzzing is a local task.",
         "issue": "ASD-STE100 Issue 9",
         "reviewStatus": "draft"
       },
@@ -3975,7 +4137,7 @@
     {
       "id": "doc-components",
       "title": "Library components and the pure/I-O boundary",
-      "plain": "Dependencies point one way: `main.rs` -> `db` -> `store` -> `wal`, and `db` -> `replay`. `wal` and `replay` import only `anyhow`; they take bytes or slices and return values. `store` and `db` own all file and SQLite I/O. `store::commits_seen` is a pure function inside the I/O module so the cursor rule can be property-tested alone.\n\n`main.rs` is shown as a supporting component of the CLI container. Tests and the fuzz crate also call the library directly (see the verification container view).\n\nNote: the doc comment in `src/lib.rs` still lists a `schema` module as pure. That module no longer exists; the doc comment is stale.",
+      "plain": "Dependencies point one way: `main.rs` -> `db` -> `store` -> `wal`, and `db` -> `replay`. `wal` and `replay` import only `anyhow`; they take bytes or slices and return values. `store` and `db` own all file and SQLite I/O. `store::commits_seen` is a pure function inside the I/O module so the cursor rule can be property-tested alone.\n\n`main.rs` is shown as a supporting component of the CLI container. Tests and the fuzz crate also call the library directly (see the verification container view).",
       "ste": {
         "text": "Dependencies go in one direction: main.rs, then db, then store, then wal. db also uses replay.\n\nwal and replay do not read or write files. store and db do all file and SQLite operations.",
         "issue": "ASD-STE100 Issue 9",
@@ -3993,7 +4155,7 @@
     {
       "id": "doc-c-db",
       "title": "db module",
-      "plain": "Names must be 1-64 characters of ASCII letters, digits, `_` or `-`, because they become folder names. `parse_statements` splits stdin into one statement per non-blank line. Every function returns a plain struct (`Created`, `DbSummary`, `LogEntry`, `Status`, `Summary`) or a count.",
+      "plain": "Names must be 1-64 characters of ASCII letters, digits, `_` or `-`, because they become folder names. `parse_statements` splits stdin into one statement per non-blank line; `split_script` splits `--script` text with `sqlite3_complete`. `exec_with` takes the history and live write locks per statement, captures commits nobody recorded as `(recovered)`, and installs an authorizer that denies `ATTACH`, `DETACH`, `PRAGMA journal_mode` and, inside a statement, transaction control. A bare `VACUUM` takes a separate autocommit path. Every function returns a plain struct (`Created`, `DbSummary`, `ExecReport`, `LogEntry`, `Status`, `Summary`) or a count.",
       "ste": {
         "text": "A database name must have 1 to 64 letters, digits, underscores or hyphens. The name becomes a folder name. Each function returns data. It does not print.",
         "issue": "ASD-STE100 Issue 9",
@@ -4007,9 +4169,9 @@
     {
       "id": "doc-decisions",
       "title": "Architecture decisions and constraints",
-      "plain": "- **Parse the WAL file directly instead of using SQLite hooks.** `store::capture` reads `live.db-wal` with `fs::read` and `wal::parse` validates magic, page size, salts and the chained checksum. Commits are frames up to one with non-zero `db_size`.\n- **Full-page replay.** Every WAL frame is a whole page, so `replay::apply` is positioned overwrites at `(pgno - 1) * page_size` on a copy of `base.db`, then a resize to commit N's `db_pages`. No SQL runs during replay.\n- **Library returns data, CLI prints.** `db` returns structs; `main.rs` only formats output. Tests call the library directly.\n- **Capture runs inside exec with autocheckpoint disabled.** `db::exec` sets `PRAGMA wal_autocheckpoint=0` and calls `capture` after every commit on the same open connection, so SQLite cannot fold frames into `live.db` before they are read.\n- **Cursor = salts + commit count.** `meta.cursor_salt` and `meta.cursor_commits` record the WAL generation and how many of its commits are stored. A new salt (WAL restarted after a checkpoint) resets the count to 0, so re-reading the same WAL adds nothing.\n- **page_size pinned at create.** `create` stores `PRAGMA page_size` in `meta`; `capture` rejects a WAL with a different page size because replay offsets depend on it.\n- **Replay allocation bound.** `clone_at` passes `max_pages = max(base pages, max db_pages over 1..=N)`; `apply` rejects any frame or size above it before changing the image.\n- **One statement = one transaction = at most one commit.** A statement that changes nothing writes no frames and adds no commit.",
+      "plain": "- **Parse the WAL file directly instead of using SQLite hooks.** `store::capture` reads `live.db-wal` and `wal::parse` validates magic, page size (a power of two, 512 to 65536), salts and the chained checksum. Commits are frames up to one with non-zero `db_size`.\n- **Full-page replay.** Every WAL frame is a whole page, so `replay::apply` is positioned overwrites at `(pgno - 1) * page_size` on a copy of `base.db`, then a resize to commit N's `db_pages`. No SQL runs during replay.\n- **Library returns data, CLI prints.** `db` returns structs; `main.rs` only formats output. Tests call the library directly.\n- **Capture runs inside exec with autocheckpoint disabled.** `db::exec_with` sets `PRAGMA wal_autocheckpoint=0` and captures after every commit on the same connection, so SQLite cannot fold frames into `live.db` before they are read.\n- **Two locks, fixed order (Q1).** Per statement: `BEGIN IMMEDIATE` on `meta.db` (history lock), then on `live.db`. Both are SQLite file locks and vanish with the process. Concurrent `exec` processes serialise; a lock not obtained within 10 s is a clean `locked` error.\n- **Recovery (Q3).** With both locks held, commits in the WAL that history lacks are captured first under the label `(recovered)`, never attributed to the statement.\n- **Statements may not control the transaction (Q2); ATTACH, DETACH and `PRAGMA journal_mode` are denied (Q8).** An authorizer enforces this. As a backstop, a failed statement that changed the WAL is still captured, and more than one commit per statement is an error.\n- **VACUUM (Q4).** Exactly `VACUUM` or `VACUUM main` runs in autocommit under the history lock and is captured as one commit. Other forms are refused.\n- **Schema first, then WAL (Q7).** `create` runs the schema in rollback mode so `page_size` and `auto_vacuum` take effect, then enables WAL and checkpoints.\n- **Cursor = salts + commit count + resume state.** `cursor_salt` and `cursor_commits` identify the WAL generation and how many commits are stored. `cursor_resume` adds the header, offset and running checksum so a capture parses only the new tail; it is used only while it agrees with the salt and count, else a full parse runs.\n- **Read paths do not write (Q11).** `list`, `status`, `log` and `clone` use `Store::open_existing`: no `meta.db` is created and no schema runs.\n- **page_size pinned at create.** `capture` rejects a WAL with a different page size because replay offsets depend on it.\n- **Replay allocation bound.** `clone_at` passes `max_pages = max(base pages, max db_pages over 1..=N)`; `apply` rejects any frame or size above it before changing the image.\n- **One statement = one transaction = at most one commit.** A statement that changes nothing writes no frames and adds no commit.",
       "ste": {
-        "text": "- walflip reads the WAL file directly. It does not use SQLite hooks.\n- Each WAL frame is a full page. Replay writes each page at its offset. Replay does not run SQL.\n- The library returns data. The CLI prints the data.\n- exec stops automatic checkpoints. exec reads the WAL after each commit.\n- The cursor is the WAL salts and the number of commits. A new salt sets the number to 0.\n- create records the page size. capture stops with an error if the WAL page size is different.",
+        "text": "- walflip reads the WAL file directly. It does not use SQLite hooks.\n- Each WAL frame is a full page. Replay writes each page at its offset. Replay does not run SQL.\n- The library returns data. The CLI prints the data.\n- exec stops automatic checkpoints. exec reads the WAL after each commit.\n- exec takes the history lock and then the live lock for each statement. Two exec commands wait for each other.\n- A commit that is in the WAL but not in the history is recorded as (recovered).\n- A statement cannot use BEGIN, COMMIT or ROLLBACK. ATTACH and DETACH are not allowed.\n- The cursor is the WAL salts, the number of commits and a resume state. A new salt sets the number to 0.\n- create records the page size. capture stops with an error if the WAL page size is different.",
         "issue": "ASD-STE100 Issue 9",
         "reviewStatus": "draft"
       },
@@ -4024,10 +4186,10 @@
     },
     {
       "id": "doc-known-gaps",
-      "title": "Known gaps (reported by TESTING_PLAN.md, not re-verified)",
-      "plain": "These defects are **reported by** [docs/TESTING_PLAN.md](https://github.com/nickstrad/walflip/blob/main/docs/TESTING_PLAN.md). They were not re-run for this documentation.\n\n- **B1** (medium): `summarize` does not double `\"` in table names, so `clone` writes the file and then fails on a name such as `a\"b`. Affects the clone report step.\n- **B2** (high): a statement that contains `COMMIT` commits to `live.db`, then `tx.commit()` fails and capture never runs; the WAL is checkpointed on close and history is lost. Affects the exec loop.\n- **B3** (medium): commits already in `live.db-wal` when `exec` starts (crashed or external writer) are captured under the next statement's label.\n- **B4** (high): concurrent `exec` on one database fails with `UNIQUE constraint failed: commits.idx` and records extra commits; the cursor is read outside the `meta.db` transaction.\n- **B5** (high): a schema with `PRAGMA journal_mode=DELETE` is accepted; afterwards every `exec` captures 0 commits.\n- **B6** (medium): `replay::apply` could be forced into a huge allocation by a large `pgno` or `db_pages`. Observation: the current code has a `max_pages` parameter and a test `huge_pgno_is_rejected_without_allocating`, so this looks addressed, but the plan still lists it.\n- **B7** (low/UX): `PRAGMA page_size` and `PRAGMA auto_vacuum` in a schema are silently ignored because WAL mode is enabled first; `create` reports 4096.\n- **B8** (low): an unterminated `BEGIN` in a schema fails with `database table is locked` instead of an \"applying schema\" message.",
+      "title": "Known limits and fixed defects",
+      "plain": "The testing plan ([docs/TESTING_PLAN.md](' + PLAN + ')) lists defects B1-B10. **All are fixed**, each with a regression test (see docs/WAVE_STATUS.md). The model in this viewer was re-checked against the code on 2026-10-15.\n\n- B1, B10: `summarize` quoted table names and the clone path correctly. B9: `clone` opens the output with `create_new`.\n- B2: transaction control inside a statement is rejected by the authorizer.\n- B3, B4: per-statement history lock; orphan commits are captured as `(recovered)`.\n- B5, B7, B8: schema runs before WAL; `PRAGMA journal_mode` is denied; `page_size` and `auto_vacuum` take effect; an unterminated `BEGIN` has its own error.\n- B6: `replay::apply` has the `max_pages` bound.\n\n**Known limits (by design):**\n- A writer that does not use walflip's locks can commit between a statement's commit and its capture. `exec` captures everything and fails with \"statement produced N commits\".\n- If outside commits are checkpointed and the WAL restarted before any `exec` runs, they are in `live.db` but not in history.\n- Incremental capture assumes the WAL is append-only within a generation.\n- Sector-padding frames from a foreign writer appear as `(recovered)` commits (Q6).\n- `exec -` splits on lines, not on `;`; use `exec --script` for multi-line SQL (Q5).\n- `clone` builds the image in memory, so it needs RAM about the size of the database.",
       "ste": {
-        "text": "The testing plan reports these defects. We did not test them again.\n\n- B1: Table names with a quote character cause the clone report to fail.\n- B2: A statement with COMMIT can cause a loss of history.\n- B3: Old commits in the WAL get the label of the next statement.\n- B4: Two exec processes at the same time can corrupt the history.\n- B5: A schema can turn off WAL mode. Then exec records no commits.\n- B6: A large page number could cause a very large allocation. The current code has a limit for this.\n- B7: create ignores page_size and auto_vacuum in the schema.\n- B8: An open BEGIN in the schema gives an unclear error.",
+        "text": "The testing plan lists defects B1 to B10. All defects are fixed. Each fix has a test.\n\nKnown limits:\n- A writer that does not use walflip can commit between a statement and its capture. exec then stops with an error.\n- exec - splits on lines. Use exec --script for SQL on many lines.\n- clone needs memory about the size of the database.",
         "issue": "ASD-STE100 Issue 9",
         "reviewStatus": "draft"
       },
@@ -4039,7 +4201,7 @@
     {
       "id": "doc-wal-format",
       "title": "WAL file format as parsed by wal::parse",
-      "plain": "All header integers are big-endian u32. The magic only selects the byte order of the checksum words.\n\n**Header, 32 bytes:** 0 magic (`0x377f0682` little-endian checksums, `0x377f0683` big-endian); 4 format version (not checked; encoder writes 3007000); 8 page size (must be a power of two and at least 512); 12 checkpoint sequence (not checked); 16 salt-1; 20 salt-2; 24 checksum-1; 28 checksum-2 (over bytes 0-23).\n\n**Frame, 24 + page_size bytes:** 0 page number; 4 db size in pages if this is a commit frame, else 0; 8 salt-1; 12 salt-2; 16 checksum-1; 20 checksum-2; 24 page image. The checksum covers frame bytes 0-7 then the page, chained from the previous frame (or the header).\n\n**Outcomes:** buffer shorter than 32 bytes or bad header checksum gives `Ok(None)`; bad magic or page size gives `Err`; the frame loop stops at the first salt mismatch (older generation), checksum mismatch or partial frame; frames after the last commit frame are dropped.",
+      "plain": "All header integers are big-endian u32. The magic only selects the byte order of the checksum words.\n\n**Header, 32 bytes:** 0 magic (`0x377f0682` little-endian checksums, `0x377f0683` big-endian); 4 format version (not checked; encoder writes 3007000); 8 page size (a power of two from 512 to 65536); 12 checkpoint sequence (not checked); 16 salt-1; 20 salt-2; 24 checksum-1; 28 checksum-2 (over bytes 0-23).\n\n**Frame, 24 + page_size bytes:** 0 page number; 4 db size in pages if this is a commit frame, else 0; 8 salt-1; 12 salt-2; 16 checksum-1; 20 checksum-2; 24 page image. The checksum covers frame bytes 0-7 then the page, chained from the previous frame (or the header).\n\n**Outcomes:** buffer shorter than 32 bytes or bad header checksum gives `Ok(None)`; bad magic or page size gives `Err`; the frame loop stops at the first salt mismatch (older generation), checksum mismatch or partial frame; frames after the last commit frame are dropped.\n\n**Resuming:** `Wal::end` is a `Resume` (header, offset after the last commit frame, running checksum, commit count). `parse_from` continues from it with only the file tail, starting at the last commit frame, whose header is re-checked against the stored checksum.",
       "ste": {
         "text": "The header has 32 bytes. It has the magic number, the page size, two salts and a checksum.\n\nEach frame has a 24-byte header and one page. The frame header has the page number, the database size, the salts and a checksum.\n\nA frame with a database size that is not zero ends a commit. The parser stops at the first bad salt or bad checksum.",
         "issue": "ASD-STE100 Issue 9",
@@ -4053,9 +4215,9 @@
     {
       "id": "doc-meta-schema",
       "title": "meta.db schema",
-      "plain": "- `meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)`: keys `page_size`, `cursor_salt` (`salt1:salt2`), `cursor_commits`.\n- `commits(idx INTEGER PRIMARY KEY, label TEXT NOT NULL, db_pages INTEGER NOT NULL, committed_at TEXT DEFAULT CURRENT_TIMESTAMP)`: `idx` is 1-based; `label` is the SQL statement.\n- `frames(commit_idx INTEGER NOT NULL REFERENCES commits(idx), seq INTEGER NOT NULL, pgno INTEGER NOT NULL, page BLOB NOT NULL, PRIMARY KEY(commit_idx, seq))`.\n\n`Store::open` runs `CREATE TABLE IF NOT EXISTS` on every open, so `list`, `status` and `log` create an empty `meta.db` if it is missing. Each `capture` writes its commits, frames and cursor in one transaction.",
+      "plain": "- `meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)`: keys `page_size`, `cursor_salt` (`salt1:salt2`), `cursor_commits`, `cursor_resume` (`v1 <header hex> <offset> <cksum0> <cksum1> <commits>`).\n- `commits(idx INTEGER PRIMARY KEY, label TEXT NOT NULL, db_pages INTEGER NOT NULL, committed_at TEXT DEFAULT CURRENT_TIMESTAMP)`: `idx` is 1-based; `label` is the SQL statement or `(recovered)`.\n- `frames(commit_idx INTEGER NOT NULL REFERENCES commits(idx), seq INTEGER NOT NULL, pgno INTEGER NOT NULL, page BLOB NOT NULL, PRIMARY KEY(commit_idx, seq))`.\n\n`Store::open` runs `CREATE TABLE IF NOT EXISTS` and is used by `create` and `exec`. The read paths (`list`, `status`, `log`, `clone`) use `Store::open_existing`, which neither creates the file nor runs the schema; `list` skips folders without `meta.db`. Each capture runs inside the history write lock (`BEGIN IMMEDIATE`) and in a savepoint, so a failed capture leaves history and the cursor unchanged.",
       "ste": {
-        "text": "meta.db has three tables: meta, commits and frames. meta keeps the page size and the cursor. commits has one row for each commit. frames keeps the page images.\n\nEach capture writes all rows in one transaction.",
+        "text": "meta.db has three tables: meta, commits and frames. meta keeps the page size and the cursor. commits has one row for each commit. frames keeps the page images.\n\nEach capture runs inside the history lock. A failed capture changes nothing.",
         "issue": "ASD-STE100 Issue 9",
         "reviewStatus": "draft"
       },
@@ -4067,9 +4229,9 @@
     {
       "id": "doc-dyn-create",
       "title": "create --schema",
-      "plain": "The name is validated before the schema file is read. WAL mode is switched on **before** the schema runs, then the WAL is checkpointed with `TRUNCATE` so `base.db` is a complete, WAL-free copy. If any step in `init_files` fails, `create` removes the whole folder.\n\nFailure cases: folder already exists; schema SQL error (folder removed). Reported gaps: B5 (schema can switch journal mode away from WAL), B7 (`page_size`/`auto_vacuum` in the schema ignored), B8 (unterminated `BEGIN` gives a locking error).",
+      "plain": "The name is validated before the schema file is read. The schema runs **first**, in rollback mode, under an authorizer that denies `ATTACH`, `DETACH` and `PRAGMA journal_mode`; a schema that leaves a transaction open is an error. Then WAL mode is switched on and the WAL is checkpointed with `TRUNCATE` so `base.db` is a complete, WAL-free copy. `page_size` and `auto_vacuum` in the schema therefore take effect. If any step fails, `create` removes the whole folder.\n\nFailure cases: folder already exists; schema SQL error; unterminated `BEGIN`; denied statement (folder removed).",
       "ste": {
-        "text": "create checks the name first. Then it reads the schema. It sets WAL mode before it runs the schema. Then it copies live.db to base.db. If a step fails, create removes the folder.",
+        "text": "create checks the name first. Then it reads the schema and runs it before WAL mode. Then it sets WAL mode and copies live.db to base.db. If a step fails, create removes the folder.",
         "issue": "ASD-STE100 Issue 9",
         "reviewStatus": "draft"
       },
@@ -4082,10 +4244,10 @@
     },
     {
       "id": "doc-dyn-exec",
-      "title": "exec: WAL parse and idempotent capture",
-      "plain": "Invariant: capture runs on the same open connection, after each commit, with automatic checkpointing off, so every committed frame is still in the WAL when it is read.\n\nThe cursor makes capture idempotent: `seen = commits_seen(cursor_salt, cursor_commits, wal.salt)`; only commits after `seen` are inserted, and the cursor is set to the WAL's total. When `exec` returns the connection closes; SQLite then normally checkpoints and removes the WAL, and the next `exec` starts a new generation with new salts, so the count restarts at 0.\n\nFailure cases: `--db` missing or unknown; SQL error (earlier statements stay committed and captured); WAL page size differs from `meta.page_size`. Reported gaps: B2 (`COMMIT` inside a statement), B3 (pre-existing WAL commits mislabelled), B4 (concurrent exec; cursor read outside the transaction).",
+      "title": "exec: locks, recovery and incremental capture",
+      "plain": "For each statement: take the history lock (`BEGIN IMMEDIATE` on `meta.db`), then the live lock (`BEGIN IMMEDIATE` on `live.db`). Both are released at the end of the statement, so concurrent `exec` processes interleave statement by statement.\n\n**Recovery:** if the WAL changed since this process's last capture, commits the history lacks are captured first as `(recovered)`. They are never attributed to the statement.\n\n**Run and capture:** the statement runs with transaction control denied and commits. Capture runs on the same open connection with automatic checkpointing off, so every committed frame is still in the WAL. The cursor makes capture idempotent: `seen = commits_seen(cursor_salt, cursor_commits, wal.salt)`. When `cursor_resume` agrees with the cursor, only the WAL tail from the stored offset is read and parsed (`parse_from`); otherwise the whole file is parsed. New commits and the new cursor are written in one savepoint, then the history lock is released.\n\n**VACUUM:** exactly `VACUUM` or `VACUUM main` cannot run in a transaction, so after the recovery capture walflip releases its live transaction and runs `VACUUM` in autocommit under the history lock. It is captured as one commit.\n\nWhen `exec` returns the connection closes; SQLite normally checkpoints and removes the WAL, and the next `exec` starts a new generation with new salts, so the count restarts at 0.\n\nFailure cases: unknown `--db`; lock not obtained within the timeout (`locked`, nothing changed); SQL error or denied statement (earlier statements stay committed and captured, and the error names how many); a statement that produced more than one commit; WAL page size differs from `meta.page_size`.",
       "ste": {
-        "text": "exec stops automatic checkpoints. After each commit, exec reads the WAL and records the new commits. The cursor tells which commits are already recorded. Thus a second read adds nothing.\n\nDo not run two exec commands on one database at the same time.",
+        "text": "For each statement, exec takes the history lock and then the live lock. First it records commits that are in the WAL but not in the history, as (recovered). Then it runs the statement. Then it reads the new part of the WAL and records the new commits. The cursor tells which commits are already recorded. Thus a second read adds nothing.\n\nTwo exec commands on one database wait for each other.",
         "issue": "ASD-STE100 Issue 9",
         "reviewStatus": "draft"
       },
@@ -4100,7 +4262,7 @@
     {
       "id": "doc-dyn-clone",
       "title": "clone -n N: replay and db_pages resize",
-      "plain": "`clone_at` loads frames of commits 1..=N in `(commit_idx, seq)` order, so later writes to a page win. `replay::apply` validates every frame before changing anything (page 0, page above `max_pages`, wrong length, `db_pages` above `max_pages` all give `Err`). After the overwrites it resizes the image to commit N's `db_pages`, which shrinks it when a later commit freed pages (for example after `DROP TABLE` with `auto_vacuum`). For N = 0 no frames apply and the result is `base.db`.\n\nThe image is built in memory, so clone needs RAM roughly the size of the database. Failure cases: output exists; N greater than the commit count; no recorded page size. Reported gap: B1 (table names containing `\"` break the report after the file is written).",
+      "plain": "`clone_at` opens `meta.db` with `Store::open_existing`, so a database with no history is an error and nothing is created. It loads frames of commits 1..=N in `(commit_idx, seq)` order, so later writes to a page win. `replay::apply` validates every frame before changing anything (page 0, page above `max_pages`, wrong length, `db_pages` above `max_pages` all give `Err`). After the overwrites it resizes the image to commit N's `db_pages`, which shrinks it when a later commit freed pages. For N = 0 no frames apply and the result is `base.db`.\n\nThe output is opened with `create_new`, so a racing clone cannot overwrite another's file. The image is built in memory, so clone needs RAM roughly the size of the database. The report opens the clone read-only (`immutable=1`, path percent-encoded).\n\nFailure cases: output exists; N greater than the commit count; no recorded page size.",
       "ste": {
         "text": "clone reads base.db into memory. It writes each stored page at its offset, in commit order. Then it sets the size to the size of commit N. Then it writes the file and checks it.",
         "issue": "ASD-STE100 Issue 9",
@@ -4116,7 +4278,7 @@
     {
       "id": "doc-dyn-inspect",
       "title": "list, status and log",
-      "plain": "These three commands are independent; the scenario shows them as unordered branches. All are read-only on history, but `Store::open` runs `CREATE TABLE IF NOT EXISTS`, so it creates `meta.db` if it is missing. `status` reports `live wal: absent (checkpointed)` when `live.db-wal` does not exist, which is the normal state between commands.",
+      "plain": "These three commands are independent; the scenario shows them as unordered branches. All are read-only: they use `Store::open_existing`, which does not create `meta.db` and does not run the schema. `list` skips folders that lack `meta.db`. `status` reports `live wal: absent (checkpointed)` when `live.db-wal` does not exist, which is the normal state between commands, and `uncaptured: N` when the WAL holds commits that history lacks (a hint, read without the lock). `log` shows the most recent N commits, oldest first; `--head` shows the first N and `--all` shows all. A label with line breaks is shown on one row.",
       "ste": {
         "text": "list, status and log only read the history. status shows if live.db-wal exists. Usually it does not exist between commands.",
         "issue": "ASD-STE100 Issue 9",
@@ -4131,9 +4293,9 @@
     {
       "id": "doc-deploy-dev",
       "title": "Deployment: developer machine",
-      "plain": "Install with `cargo install --path .` (Rust 1.75+, Unix-like OS; SQLite is bundled). Make targets: `make build` (`cargo build --release`), `make test` (`cargo test`), `make fuzz` (`cargo +nightly fuzz run wal_parse -- -max_total_time=$(FUZZ_SECS)`, default 30 s, needs nightly and cargo-fuzz), `make seed` (build, then `scripts/seed.sh` with `WALFLIP=target/release/walflip`), `make demo` (seed, then clone at 250 and 500 into `/tmp`), `make clean`, `make distclean`.\n\nThe data root defaults to `walflip-data/` in the working directory, so the installed binary and the release binary share data only when run from the same directory.",
+      "plain": "Install with `cargo install --path .` (Rust 1.85+, Unix-like OS; SQLite is bundled; the test suite needs Rust 1.88+). Make targets: `make build` (`cargo build --release`), `make test` (`cargo test --features testing`), `make fuzz` (each of the six fuzz targets for `FUZZ_SECS`, default 30 s, needs nightly and cargo-fuzz), `make fuzz-replay` (replay the committed corpora once), `make seed` (build, then `scripts/seed.sh` with `WALFLIP=target/release/walflip`), `make demo` (seed, then clone at 250 and 500 into `/tmp`), `make clean`, `make distclean`.\n\nThe data root defaults to `walflip-data/` in the working directory, so the installed binary and the release binary share data only when run from the same directory.",
       "ste": {
-        "text": "Install walflip with cargo install. Use make build, make test, make fuzz, make seed and make demo. make fuzz needs the nightly Rust toolchain and cargo-fuzz.",
+        "text": "Install walflip with cargo install. Use make build, make test, make fuzz, make fuzz-replay, make seed and make demo. make fuzz needs the nightly Rust toolchain and cargo-fuzz.",
         "issue": "ASD-STE100 Issue 9",
         "reviewStatus": "draft"
       },
@@ -4146,10 +4308,10 @@
     },
     {
       "id": "doc-deploy-ci",
-      "title": "Deployment: CI (planned)",
-      "plain": "Not implemented. [TESTING_PLAN.md](https://github.com/nickstrad/walflip/blob/main/docs/TESTING_PLAN.md) section 2.4 plans a nightly job (each fuzz target for 300 s with `-rss_limit_mb=1024` and a dictionary) and a PR job (`cargo +nightly fuzz build` plus corpus replay with `-runs=0`).",
+      "title": "Deployment: CI (GitHub Actions)",
+      "plain": "`.github/workflows/ci.yml` is the only active workflow. It runs on pull requests and pushes to `main`, on `ubuntu-24.04` (pinned), and does `cargo test --features testing`.\n\nThe nightly fuzz workflow and the PR-time fuzz build + corpus replay job were archived on request (`archive/ci/fuzz-nightly.yml`, `archive/ci/fuzz-build-replay.yml`). Fuzzing is local.",
       "ste": {
-        "text": "This deployment is planned. It does not exist now.",
+        "text": "CI runs cargo test on each pull request and each push to main. The fuzz workflows are archived. Fuzzing is a local task.",
         "issue": "ASD-STE100 Issue 9",
         "reviewStatus": "draft"
       },
@@ -4165,133 +4327,196 @@
       "title": "walflip README",
       "url": "https://github.com/nickstrad/walflip/blob/main/README.md",
       "path": "README.md",
-      "notes": "Read from the local checkout on 2026-10-14. The GitHub URL assumes the repository is pushed to main."
+      "notes": "Read from the local checkout on 2026-10-15. The GitHub URL assumes the repository is pushed to main."
     },
     {
       "id": "src-cargo",
       "title": "Cargo manifest",
       "url": "https://github.com/nickstrad/walflip/blob/main/Cargo.toml",
       "path": "Cargo.toml",
-      "notes": "Read from the local checkout on 2026-10-14. The GitHub URL assumes the repository is pushed to main."
+      "notes": "Read from the local checkout on 2026-10-15. The GitHub URL assumes the repository is pushed to main."
     },
     {
       "id": "src-lib",
       "title": "Library root",
       "url": "https://github.com/nickstrad/walflip/blob/main/src/lib.rs",
       "path": "src/lib.rs",
-      "notes": "Read from the local checkout on 2026-10-14. The GitHub URL assumes the repository is pushed to main."
+      "notes": "Read from the local checkout on 2026-10-15. The GitHub URL assumes the repository is pushed to main."
     },
     {
       "id": "src-main",
       "title": "CLI entry point",
       "url": "https://github.com/nickstrad/walflip/blob/main/src/main.rs",
       "path": "src/main.rs",
-      "notes": "Read from the local checkout on 2026-10-14. The GitHub URL assumes the repository is pushed to main."
+      "notes": "Read from the local checkout on 2026-10-15. The GitHub URL assumes the repository is pushed to main."
     },
     {
       "id": "src-db",
       "title": "Database operations",
       "url": "https://github.com/nickstrad/walflip/blob/main/src/db.rs",
       "path": "src/db.rs",
-      "notes": "Read from the local checkout on 2026-10-14. The GitHub URL assumes the repository is pushed to main."
+      "notes": "Read from the local checkout on 2026-10-15. The GitHub URL assumes the repository is pushed to main."
     },
     {
       "id": "src-wal",
       "title": "WAL parser and reference encoder",
       "url": "https://github.com/nickstrad/walflip/blob/main/src/wal.rs",
       "path": "src/wal.rs",
-      "notes": "Read from the local checkout on 2026-10-14. The GitHub URL assumes the repository is pushed to main."
+      "notes": "Read from the local checkout on 2026-10-15. The GitHub URL assumes the repository is pushed to main."
     },
     {
       "id": "src-replay",
       "title": "Page replay",
       "url": "https://github.com/nickstrad/walflip/blob/main/src/replay.rs",
       "path": "src/replay.rs",
-      "notes": "Read from the local checkout on 2026-10-14. The GitHub URL assumes the repository is pushed to main."
+      "notes": "Read from the local checkout on 2026-10-15. The GitHub URL assumes the repository is pushed to main."
     },
     {
       "id": "src-store",
       "title": "meta.db store and capture cursor",
       "url": "https://github.com/nickstrad/walflip/blob/main/src/store.rs",
       "path": "src/store.rs",
-      "notes": "Read from the local checkout on 2026-10-14. The GitHub URL assumes the repository is pushed to main."
+      "notes": "Read from the local checkout on 2026-10-15. The GitHub URL assumes the repository is pushed to main."
     },
     {
       "id": "src-tests-common",
       "title": "E2E harness",
       "url": "https://github.com/nickstrad/walflip/blob/main/tests/common/mod.rs",
       "path": "tests/common/mod.rs",
-      "notes": "Read from the local checkout on 2026-10-14. The GitHub URL assumes the repository is pushed to main."
+      "notes": "Read from the local checkout on 2026-10-15. The GitHub URL assumes the repository is pushed to main."
     },
     {
       "id": "src-tests-invariants",
       "title": "Invariant checks",
       "url": "https://github.com/nickstrad/walflip/blob/main/tests/common/invariants.rs",
       "path": "tests/common/invariants.rs",
-      "notes": "Read from the local checkout on 2026-10-14. The GitHub URL assumes the repository is pushed to main."
+      "notes": "Read from the local checkout on 2026-10-15. The GitHub URL assumes the repository is pushed to main."
     },
     {
       "id": "src-tests-model",
       "title": "Shadow-database oracle",
       "url": "https://github.com/nickstrad/walflip/blob/main/tests/common/model.rs",
       "path": "tests/common/model.rs",
-      "notes": "Read from the local checkout on 2026-10-14. The GitHub URL assumes the repository is pushed to main."
+      "notes": "Read from the local checkout on 2026-10-15. The GitHub URL assumes the repository is pushed to main."
     },
     {
       "id": "src-tests-cli",
       "title": "End-to-end scenarios",
       "url": "https://github.com/nickstrad/walflip/blob/main/tests/cli.rs",
       "path": "tests/cli.rs",
-      "notes": "Read from the local checkout on 2026-10-14. The GitHub URL assumes the repository is pushed to main."
+      "notes": "Read from the local checkout on 2026-10-15. The GitHub URL assumes the repository is pushed to main."
+    },
+    {
+      "id": "src-tests-scenarios",
+      "title": "Scenario suites (usage, ddl, schema, failure, concurrency, core)",
+      "url": "https://github.com/nickstrad/walflip/blob/main/tests/scenarios_usage.rs",
+      "path": "tests/scenarios_usage.rs",
+      "notes": "Read from the local checkout on 2026-10-15. The GitHub URL assumes the repository is pushed to main."
+    },
+    {
+      "id": "src-tests-library",
+      "title": "Library-level scenarios",
+      "url": "https://github.com/nickstrad/walflip/blob/main/tests/library.rs",
+      "path": "tests/library.rs",
+      "notes": "Read from the local checkout on 2026-10-15. The GitHub URL assumes the repository is pushed to main."
+    },
+    {
+      "id": "src-tests-perf",
+      "title": "Performance smoke test",
+      "url": "https://github.com/nickstrad/walflip/blob/main/tests/perf.rs",
+      "path": "tests/perf.rs",
+      "notes": "Read from the local checkout on 2026-10-15. The GitHub URL assumes the repository is pushed to main."
+    },
+    {
+      "id": "src-tests-fuzzseed",
+      "title": "Fuzz corpus generator",
+      "url": "https://github.com/nickstrad/walflip/blob/main/tests/fuzz_seed.rs",
+      "path": "tests/fuzz_seed.rs",
+      "notes": "Read from the local checkout on 2026-10-15. The GitHub URL assumes the repository is pushed to main."
+    },
+    {
+      "id": "src-ci",
+      "title": "CI workflow",
+      "url": "https://github.com/nickstrad/walflip/blob/main/.github/workflows/ci.yml",
+      "path": ".github/workflows/ci.yml",
+      "notes": "Read from the local checkout on 2026-10-15. The GitHub URL assumes the repository is pushed to main."
+    },
+    {
+      "id": "src-ci-archive",
+      "title": "Archived nightly fuzz workflow",
+      "url": "https://github.com/nickstrad/walflip/blob/main/archive/ci/fuzz-nightly.yml",
+      "path": "archive/ci/fuzz-nightly.yml",
+      "notes": "Read from the local checkout on 2026-10-15. The GitHub URL assumes the repository is pushed to main."
+    },
+    {
+      "id": "src-status",
+      "title": "Wave status, decisions and known limits",
+      "url": "https://github.com/nickstrad/walflip/blob/main/docs/WAVE_STATUS.md",
+      "path": "docs/WAVE_STATUS.md",
+      "notes": "Read from the local checkout on 2026-10-15. The GitHub URL assumes the repository is pushed to main."
+    },
+    {
+      "id": "src-fuzz-readme",
+      "title": "Fuzzing guide",
+      "url": "https://github.com/nickstrad/walflip/blob/main/fuzz/README.md",
+      "path": "fuzz/README.md",
+      "notes": "Read from the local checkout on 2026-10-15. The GitHub URL assumes the repository is pushed to main."
     },
     {
       "id": "src-tests-roundtrip",
       "title": "Round-trip property tests",
       "url": "https://github.com/nickstrad/walflip/blob/main/tests/roundtrip.rs",
       "path": "tests/roundtrip.rs",
-      "notes": "Read from the local checkout on 2026-10-14. The GitHub URL assumes the repository is pushed to main."
+      "notes": "Read from the local checkout on 2026-10-15. The GitHub URL assumes the repository is pushed to main."
     },
     {
       "id": "src-fuzz",
       "title": "wal_parse fuzz target",
       "url": "https://github.com/nickstrad/walflip/blob/main/fuzz/fuzz_targets/wal_parse.rs",
       "path": "fuzz/fuzz_targets/wal_parse.rs",
-      "notes": "Read from the local checkout on 2026-10-14. The GitHub URL assumes the repository is pushed to main."
+      "notes": "Read from the local checkout on 2026-10-15. The GitHub URL assumes the repository is pushed to main."
+    },
+    {
+      "id": "src-fuzz-exec",
+      "title": "exec_sql fuzz target (structured SQL programs)",
+      "url": "https://github.com/nickstrad/walflip/blob/main/fuzz/fuzz_targets/exec_sql.rs",
+      "path": "fuzz/fuzz_targets/exec_sql.rs",
+      "notes": "Read from the local checkout on 2026-10-15. The GitHub URL assumes the repository is pushed to main."
     },
     {
       "id": "src-fuzz-cargo",
       "title": "Fuzz crate manifest",
       "url": "https://github.com/nickstrad/walflip/blob/main/fuzz/Cargo.toml",
       "path": "fuzz/Cargo.toml",
-      "notes": "Read from the local checkout on 2026-10-14. The GitHub URL assumes the repository is pushed to main."
+      "notes": "Read from the local checkout on 2026-10-15. The GitHub URL assumes the repository is pushed to main."
     },
     {
       "id": "src-seed",
       "title": "Seed script",
       "url": "https://github.com/nickstrad/walflip/blob/main/scripts/seed.sh",
       "path": "scripts/seed.sh",
-      "notes": "Read from the local checkout on 2026-10-14. The GitHub URL assumes the repository is pushed to main."
+      "notes": "Read from the local checkout on 2026-10-15. The GitHub URL assumes the repository is pushed to main."
     },
     {
       "id": "src-example",
       "title": "Example schema",
       "url": "https://github.com/nickstrad/walflip/blob/main/examples/processes.sql",
       "path": "examples/processes.sql",
-      "notes": "Read from the local checkout on 2026-10-14. The GitHub URL assumes the repository is pushed to main."
+      "notes": "Read from the local checkout on 2026-10-15. The GitHub URL assumes the repository is pushed to main."
     },
     {
       "id": "src-make",
       "title": "Make targets",
       "url": "https://github.com/nickstrad/walflip/blob/main/Makefile",
       "path": "Makefile",
-      "notes": "Read from the local checkout on 2026-10-14. The GitHub URL assumes the repository is pushed to main."
+      "notes": "Read from the local checkout on 2026-10-15. The GitHub URL assumes the repository is pushed to main."
     },
     {
       "id": "src-plan",
-      "title": "Testing plan (bug IDs B1-B8, invariants INV-xx)",
+      "title": "Testing plan (bug IDs B1-B10, invariants INV-xx)",
       "url": "https://github.com/nickstrad/walflip/blob/main/docs/TESTING_PLAN.md",
       "path": "docs/TESTING_PLAN.md",
-      "notes": "Read from the local checkout on 2026-10-14. The GitHub URL assumes the repository is pushed to main."
+      "notes": "Read from the local checkout on 2026-10-15. The GitHub URL assumes the repository is pushed to main."
     }
   ]
 }
