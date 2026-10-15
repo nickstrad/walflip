@@ -290,3 +290,55 @@ fn inv23_cursor_matches_wal_while_reader_pins_it() {
     let o = assert_invariants(&root, "cur", Some(&m), Checks::full());
     assert_eq!(o.commits, 8, "no duplicated or lost commits across generations");
 }
+
+/// INV-10 / Q6: sector-padding duplicate commit frames. A foreign writer with `POWERSAFE_OVERWRITE`
+/// off (`?psow=0`) and `synchronous=FULL` makes SQLite repeat each commit frame to fill a sector.
+/// Policy (Q6): the parser and `capture` are left alone, so every padding frame counts as its own
+/// commit, each labelled `(recovered)`; replay is still exact because the copies carry identical
+/// pages. Self-skips (with a printed reason) if SQLite does not pad on this machine.
+#[test]
+fn inv10_sector_padding_frames_are_counted_as_recovered_commits() {
+    let (_tmp, root) = root_and_tmp();
+    let d = create(&root, "pad", "CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT)");
+    let base = Store::open(&d.meta).unwrap().commit_count().unwrap();
+
+    let uri = format!("file:{}?psow=0", d.live.display());
+    let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_URI;
+    let foreign = Connection::open_with_flags(&uri, flags).unwrap();
+    foreign.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
+    foreign.pragma_update(None, "synchronous", "FULL").unwrap();
+    for i in 0..3 {
+        foreign.execute("INSERT INTO t(v) VALUES (?1)", [format!("row{i}")]).unwrap();
+    }
+    // Count real frames in the WAL, independent of walflip's capture.
+    let wal_bytes = fs::read(d.wal_path()).unwrap();
+    let ps = page_size(&d);
+    let frames = (wal_bytes.len() - 32) / (24 + ps);
+    if frames <= 3 {
+        eprintln!("SKIP inv10: SQLite wrote {frames} frames for 3 inserts (no sector padding on this platform)");
+        return;
+    }
+
+    // A no-op statement: exec's recovery step captures what the foreign writer left in the WAL.
+    let report =
+        db::exec_with(&d, &["UPDATE t SET v = v WHERE 0".to_string()], std::time::Duration::from_secs(5)).unwrap();
+    let new_commits = Store::open(&d.meta).unwrap().commit_count().unwrap() - base;
+    eprintln!("inv10: {frames} WAL frames, {new_commits} commits captured, {} recovered", report.recovered);
+    assert!(new_commits > 3, "padding should inflate 3 inserts to more than 3 commits, got {new_commits}");
+    assert_eq!(report.recovered as u64, new_commits, "every extra commit is labelled (recovered)");
+    assert_eq!(report.captured as u64, new_commits);
+    let log = db::log(&d, 1000, false).unwrap();
+    let recovered = log.iter().filter(|e| e.sql == db::RECOVERED_LABEL).count() as u64;
+    assert_eq!(recovered, new_commits);
+
+    let total = new_commits + base;
+    drop(foreign); // checkpoints and removes the WAL
+    let out = root.join("pad-clone.db");
+    db::clone_at(&d, total, &out).unwrap();
+    assert_eq!(fs::read(&out).unwrap(), fs::read(&d.live).unwrap(), "clone(total) == live bytes");
+    let c = Connection::open(&d.live).unwrap();
+    let ok: String = c.query_row("PRAGMA integrity_check", [], |r| r.get(0)).unwrap();
+    assert_eq!(ok, "ok");
+    let n: i64 = c.query_row("SELECT count(*) FROM t", [], |r| r.get(0)).unwrap();
+    assert_eq!(n, 3);
+}
