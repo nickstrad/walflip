@@ -109,7 +109,11 @@ with no SQL involved.
 - **A statement that changes nothing is not a commit.** SQLite writes no frames for an
   `UPDATE` that matches no rows or sets identical values.
 - **Each `exec` statement is one commit.** Multi-statement transactions are not exposed.
-- **`clone` builds the image in memory**, so it needs RAM roughly equal to the database size.
+- **`clone` builds the image in memory.** It reads the base snapshot and loads every captured
+  page image up to commit `N` (no de-duplication), so peak RAM is roughly the base size plus the
+  sum of frames up to `N`. It scales with history length, not only with the size of the live
+  database. Cloning an early commit of a long-lived database is cheap; cloning the latest commit
+  of a heavily rewritten one may need several times the database size.
 - Page size is fixed at `create`; changing it afterwards is rejected at capture time.
 
 ## Development
