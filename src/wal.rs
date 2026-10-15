@@ -100,3 +100,127 @@ pub fn parse(buf: &[u8]) -> Result<Option<Wal<'_>>> {
 
     Ok(Some(Wal { page_size, salt, commits }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    const PS: usize = 512;
+    type Owned = Vec<(Vec<(u32, Vec<u8>)>, u32)>;
+
+    fn put(out: &mut Vec<u8>, v: u32) {
+        out.extend_from_slice(&v.to_be_bytes());
+    }
+
+    /// Reference WAL writer, independent of the parser, used to generate valid input.
+    fn encode(big_endian: bool, salt: (u32, u32), commits: &Owned) -> Vec<u8> {
+        let mut out = Vec::new();
+        put(&mut out, if big_endian { MAGIC_BE } else { MAGIC_LE });
+        for v in [3007000, PS as u32, 0, salt.0, salt.1] {
+            put(&mut out, v);
+        }
+        let (mut s0, mut s1) = checksum(big_endian, &out[0..24], 0, 0);
+        put(&mut out, s0);
+        put(&mut out, s1);
+        for (frames, db_pages) in commits {
+            for (i, (pgno, page)) in frames.iter().enumerate() {
+                let size = if i + 1 == frames.len() { *db_pages } else { 0 };
+                let mut fh = Vec::new();
+                for v in [*pgno, size, salt.0, salt.1] {
+                    put(&mut fh, v);
+                }
+                let (c0, c1) = checksum(big_endian, &fh[0..8], s0, s1);
+                (s0, s1) = checksum(big_endian, page, c0, c1);
+                put(&mut fh, s0);
+                put(&mut fh, s1);
+                out.extend(fh);
+                out.extend(page);
+            }
+        }
+        out
+    }
+
+    fn owned(w: &Wal) -> Owned {
+        w.commits
+            .iter()
+            .map(|c| (c.frames.iter().map(|f| (f.pgno, f.page.to_vec())).collect(), c.db_pages))
+            .collect()
+    }
+
+    fn parsed(buf: &[u8]) -> Owned {
+        parse(buf).ok().flatten().map(|w| owned(&w)).unwrap_or_default()
+    }
+
+    fn page() -> impl Strategy<Value = Vec<u8>> {
+        prop::collection::vec(any::<u8>(), PS)
+    }
+
+    fn commit() -> impl Strategy<Value = (Vec<(u32, Vec<u8>)>, u32)> {
+        (prop::collection::vec((1u32..8, page()), 1..4), 1u32..8)
+    }
+
+    fn commits(min: usize) -> impl Strategy<Value = Owned> {
+        prop::collection::vec(commit(), min..6)
+    }
+
+    proptest! {
+        #[test]
+        fn roundtrips_in_both_byte_orders(be in any::<bool>(), salt in any::<(u32, u32)>(), c in commits(0)) {
+            let buf = encode(be, salt, &c);
+            let w = parse(&buf).unwrap().unwrap();
+            prop_assert_eq!(w.page_size as usize, PS);
+            prop_assert_eq!(w.salt, salt);
+            prop_assert_eq!(owned(&w), c);
+        }
+
+        /// A WAL cut off anywhere yields exactly the commits that were fully written.
+        #[test]
+        fn truncation_keeps_a_prefix_of_commits(be in any::<bool>(), c in commits(1), cut in any::<usize>()) {
+            let buf = encode(be, (7, 9), &c);
+            let cut = cut % (buf.len() + 1);
+            let got = parsed(&buf[..cut]);
+            prop_assert!(got.len() <= c.len());
+            prop_assert_eq!(&got[..], &c[..got.len()]);
+            if cut == buf.len() {
+                prop_assert_eq!(got.len(), c.len());
+            }
+        }
+
+        /// Flipping any byte after the header never lets altered data through.
+        #[test]
+        fn corruption_cuts_history_at_the_damaged_frame(c in commits(1), pos in any::<usize>(), flip in 1u8..=255) {
+            let mut buf = encode(false, (1, 2), &c);
+            let pos = WAL_HEADER + pos % (buf.len() - WAL_HEADER);
+            buf[pos] ^= flip;
+            let got = parsed(&buf);
+
+            let damaged_frame = (pos - WAL_HEADER) / (FRAME_HEADER + PS);
+            let mut frames_before = 0;
+            let intact = c.iter().take_while(|(f, _)| { frames_before += f.len(); frames_before <= damaged_frame }).count();
+            prop_assert!(got.len() <= intact);
+            prop_assert_eq!(&got[..], &c[..got.len()]);
+        }
+
+        #[test]
+        fn arbitrary_bytes_never_panic(bytes in prop::collection::vec(any::<u8>(), 0..2048)) {
+            let _ = parse(&bytes);
+        }
+
+        #[test]
+        fn valid_header_with_garbage_tail_never_panics(tail in prop::collection::vec(any::<u8>(), 0..3000), be in any::<bool>()) {
+            let mut buf = encode(be, (3, 4), &Vec::new());
+            buf.extend(tail);
+            prop_assert!(parse(&buf).unwrap().is_some());
+        }
+    }
+
+    #[test]
+    fn unfinished_transaction_is_ignored() {
+        // Commit frame is what makes a transaction durable; frames after the last one do not count.
+        let page = vec![1u8; PS];
+        let buf = encode(false, (1, 1), &vec![(vec![(1, page.clone()), (2, page)], 2)]);
+        let first_frame_only = &buf[..WAL_HEADER + FRAME_HEADER + PS];
+        assert!(parsed(first_frame_only).is_empty());
+    }
+}

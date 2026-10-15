@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Seeds walflip-data with exactly 500 changes: 250 INSERT, 150 UPDATE, 100 DELETE.
+# Seeds the 'processes' database with exactly 500 changes: 250 INSERT, 150 UPDATE, 100 DELETE.
 # The data is the process table, i.e. what ps(1) reads from the kernel.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -8,18 +8,6 @@ BIN=${WALFLIP:-target/release/walflip}
 [[ -x $BIN ]] || cargo build --release
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
-
-cat > "$tmp/schema.sql" <<'SQL'
--- one row per process, columns mirror `ps -o pid,ppid,pcpu,rss,stat,comm`
-CREATE TABLE processes(
-    pid     INTEGER PRIMARY KEY,
-    ppid    INTEGER NOT NULL,
-    name    TEXT    NOT NULL,
-    state   TEXT    NOT NULL,
-    cpu_pct REAL    NOT NULL,
-    rss_kb  INTEGER NOT NULL
-);
-SQL
 
 ps -axo pid=,ppid=,pcpu=,rss=,stat=,comm= > "$tmp/a.txt"
 sleep 1
@@ -50,15 +38,19 @@ END {
 }' "$tmp/b.txt" "$tmp/a.txt" > "$tmp/changes.sql"
 
 echo "generated $(wc -l < "$tmp/changes.sql") statements"
-"$BIN" init --schema "$tmp/schema.sql" --force
+DB=${WALFLIP_DB:-processes}
+export WALFLIP_DB=$DB
+"$BIN" drop "$DB" 2>/dev/null || true
+"$BIN" create "$DB" --schema examples/processes.sql
 "$BIN" exec - < "$tmp/changes.sql"
 "$BIN" status | tee "$tmp/status.txt"
 # Every statement must have produced a commit; SQLite skips writes that change nothing.
 grep -qx 'commits   : 500' "$tmp/status.txt" || { echo "expected 500 commits" >&2; exit 1; }
 cat <<'EOF'
 
-try:
-  walflip log --limit 10
-  walflip clone -n 250 -o /tmp/at250.db    # inserts only: 250 rows
-  walflip clone -n 500 -o /tmp/at500.db    # everything: 150 rows
+try (database "processes", or set WALFLIP_DB):
+  walflip list
+  walflip --db processes log --limit 10
+  walflip --db processes clone -n 250 -o /tmp/at250.db    # inserts only: 250 rows
+  walflip --db processes clone -n 500 -o /tmp/at500.db    # everything: 150 rows
 EOF

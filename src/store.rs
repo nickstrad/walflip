@@ -26,6 +26,22 @@ fn set_meta(conn: &Connection, key: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
+/// How many commits of the WAL generation identified by `salt` are already stored.
+///
+/// The cursor is (salt1:salt2, commits seen). A different salt means SQLite restarted the WAL
+/// after a checkpoint, so nothing in it has been seen yet.
+pub fn commits_seen(
+    stored_salt: Option<&str>,
+    stored_commits: Option<&str>,
+    salt: (u32, u32),
+) -> usize {
+    let current = format!("{}:{}", salt.0, salt.1);
+    match stored_salt {
+        Some(s) if s == current => stored_commits.and_then(|v| v.parse().ok()).unwrap_or(0),
+        _ => 0,
+    }
+}
+
 pub struct Store {
     conn: Connection,
 }
@@ -60,9 +76,8 @@ impl Store {
         Ok(self.conn.query_row("SELECT count(*) FROM commits", [], |r| r.get(0))?)
     }
 
-    /// Copy any commits in the live WAL we have not stored yet. Idempotent: the cursor is
-    /// (salt1:salt2, commits seen), so re-reading the same WAL adds nothing, and a WAL restart
-    /// (new salts after a checkpoint) starts counting from zero again.
+    /// Copy any commits in the live WAL we have not stored yet. Idempotent: re-reading the
+    /// same WAL adds nothing. Returns the number of commits added.
     pub fn capture(&mut self, wal_path: &Path, label: &str) -> Result<usize> {
         let bytes = match fs::read(wal_path) {
             Ok(b) => b,
@@ -71,7 +86,7 @@ impl Store {
         };
         let Some(wal) = wal::parse(&bytes)? else { return Ok(0) };
 
-        // Clone writes pages at (pgno-1)*page_size using the size saved at init; a different
+        // Clone writes pages at (pgno-1)*page_size using the size saved at create; a different
         // size in the WAL would make replayed frames land at the wrong offsets.
         if let Some(stored) = self.page_size()? {
             if stored != u64::from(wal.page_size) {
@@ -79,12 +94,11 @@ impl Store {
             }
         }
 
-        let salt = format!("{}:{}", wal.salt.0, wal.salt.1);
-        let seen: usize = if self.get("cursor_salt")?.as_deref() == Some(salt.as_str()) {
-            self.get("cursor_commits")?.and_then(|v| v.parse().ok()).unwrap_or(0)
-        } else {
-            0
-        };
+        let seen = commits_seen(
+            self.get("cursor_salt")?.as_deref(),
+            self.get("cursor_commits")?.as_deref(),
+            wal.salt,
+        );
         let total = wal.commits.len();
         let first_idx = self.commit_count()? + 1;
 
@@ -101,9 +115,39 @@ impl Store {
                 )?;
             }
         }
-        set_meta(&tx, "cursor_salt", &salt)?;
+        set_meta(&tx, "cursor_salt", &format!("{}:{}", wal.salt.0, wal.salt.1))?;
         set_meta(&tx, "cursor_commits", &total.to_string())?;
         tx.commit()?;
         Ok(total.saturating_sub(seen))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    #[test]
+    fn cursor_cases() {
+        assert_eq!(commits_seen(None, None, (1, 2)), 0);
+        assert_eq!(commits_seen(Some("1:2"), Some("5"), (1, 2)), 5);
+        assert_eq!(commits_seen(Some("1:2"), Some("5"), (1, 3)), 0, "new salt restarts the count");
+        assert_eq!(commits_seen(Some("1:2"), Some("junk"), (1, 2)), 0);
+        assert_eq!(commits_seen(Some("1:2"), None, (1, 2)), 0);
+    }
+
+    proptest! {
+        #[test]
+        fn matching_salt_returns_stored_count(s in any::<(u32, u32)>(), n in any::<u32>()) {
+            let stored = format!("{}:{}", s.0, s.1);
+            prop_assert_eq!(commits_seen(Some(&stored), Some(&n.to_string()), s), n as usize);
+        }
+
+        #[test]
+        fn different_salt_always_restarts(a in any::<(u32, u32)>(), b in any::<(u32, u32)>(), n in any::<u32>()) {
+            prop_assume!(a != b);
+            let stored = format!("{}:{}", a.0, a.1);
+            prop_assert_eq!(commits_seen(Some(&stored), Some(&n.to_string()), b), 0);
+        }
     }
 }

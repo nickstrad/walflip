@@ -3,20 +3,29 @@ DIR := walflip-data
 AT250 := /tmp/at250.db
 AT500 := /tmp/at500.db
 
-.PHONY: build seed demo clean distclean
+.PHONY: build test fuzz seed demo clean distclean
 
 build:
 	cargo build --release
 
-# Create walflip-data/ and seed it with 500 changes
+# Unit, property and end-to-end tests
+test:
+	cargo test
+
+# Coverage-guided fuzzing (needs nightly + cargo-fuzz); FUZZ_SECS per target
+FUZZ_SECS ?= 30
+fuzz:
+	cargo +nightly fuzz run wal_parse -- -max_total_time=$(FUZZ_SECS)
+
+# Create walflip-data/processes/ and seed it with 500 changes
 seed: build
 	WALFLIP=$(BIN) scripts/seed.sh
 
 # Seed, then clone at 250 and 500 commits into /tmp
 demo: seed
 	rm -f $(AT250) $(AT500)
-	$(BIN) clone -n 250 -o $(AT250)
-	$(BIN) clone -n 500 -o $(AT500)
+	$(BIN) --db processes clone -n 250 -o $(AT250)
+	$(BIN) --db processes clone -n 500 -o $(AT500)
 
 # Remove example data and clones, keep the build
 clean:
