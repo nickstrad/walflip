@@ -137,6 +137,9 @@ with no SQL involved.
   `walflip exec` processes wait) and VACUUM then takes the write lock itself. A program that
   writes `live.db` directly can commit in between; its commit is captured with the VACUUM's
   label and that `exec` fails with `VACUUM produced 2 commits` (all of them are captured).
+- **A `VACUUM` (or any write) by another program that is checkpointed before walflip captures it
+  is lost from history, and a clone at the latest commit can then be corrupt, not just stale.**
+  Run `VACUUM` through `walflip exec`, not directly against `live.db`.
 - **`exec -` splits on lines**, not on `;`: one statement per non-blank line, no trailing `;` required. A statement that spans several lines fails with `incomplete input` and nothing from that line is committed (earlier lines stay committed). Pass multi-line or multi-statement SQL as one statement per `exec` argument, or put each statement on its own line.
 - **Foreign writers with `POWERSAFE_OVERWRITE` off** (`?psow=0` plus `synchronous=FULL`) make SQLite repeat each commit frame to pad a sector. walflip does not merge them: each padding frame is a separate commit labelled `(recovered)`, so history can show more commits than statements. Replay is still exact, since the copies are identical pages. walflip's own connection never pads.
 - **History is page-level.** The WAL contains pages, not statements. The `sql` shown by

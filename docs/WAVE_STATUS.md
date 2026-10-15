@@ -12,24 +12,25 @@ everything so a fresh session can continue.
 | W2 | T03 `Scenario`/`Step`/`Driver`, T09 store tests, T10 WAL parser tests, T17 `wal_differential`, T18 `replay_apply`/`store_capture`/`statements_split` fuzz targets | merged |
 | W3 | T04 CLI scenarios, T05 usage S2/S3/S4/S5/S8/S16/S17, T06 DDL S6/S7, T07 schema matrix S18, T08 library S9/S11/INV-23, T12 concurrency S12-S15, T19 fuzz seed corpus, T22 perf smoke + README | merged |
 | W4 | T13 B1 quoting + B9 clone race, T15 schema-before-WAL + authorizer (B5/B7/B8, Q7/Q8), T14 reject transaction control (B2, Q2), T16 writer lock + `(recovered)` pre-capture (B4/B3, Q1), T24 incremental capture (INV-51), T20 CI workflows, Q9 `log` default | merged |
+| W6 | B10 percent-encoded clone path, CI seed-script fix (green on GitHub), INV-08 page-size bound, Q4 `exec VACUUM`, Q5 (keep line splitting, docs), Q6 (pin padding behaviour, leave parser), Q11 `Store::open_existing`, T21 `exec_sql` fuzz target | merged |
 | W5 | T23 final review: re-ran everything and reconciled the plan's status cells (INV, S1-S20, T01-T24) with the tests. Results are at the top of `docs/TESTING_PLAN.md`. | docs only; found B10 |
 | extra | `docs/architecture/` C4 viewer built with c4-sdk | `cd docs/architecture && npm install && npm run dev` (Node 22.23.2) |
 
 ## Defects
 
-Defects B1-B10 from the plan are fixed, each with a regression test (B10 was found by T23 and
-fixed afterwards). Open items (the same list as `docs/TESTING_PLAN.md` section 1.6):
+Defects B1-B10 are fixed, each with a regression test. Questions Q1-Q9, Q11 and INV-08 are decided
+and implemented (see Decisions). Open items (same list as `docs/TESTING_PLAN.md` section 1.6):
 
 | Item | State |
 |---|---|
-| INV-08 | WAL page size above 65536 is accepted. `#[ignore]`d unit test that fails; harmless (zero frames fit). Decide: adopt the upper bound or document. |
 | INV-58 (exec side), INV-56, INV-60 | Partial coverage: the `exec` refusal on a non-WAL `live.db` is untested; empty schema vs no schema is not byte-compared; `base.db` sidecars and journal mode are not asserted. |
-| CI lint | `.github/workflows/*.yml` were never linted: `actionlint` was not installed for T20 or T23. Both files parse as YAML. Run `actionlint .github/workflows/*.yml`, and watch the first CI run. |
-| Q4 | `exec VACUUM` still errors (no library entry point either). Undecided; needs its own bypass of the transaction-control denial (`VACUUM INTO` trips SQLITE_TRANSACTION). |
-| Q5, Q6 (INV-10), Q11 | Line-based `exec -` splitting, sector-padding duplicate commit frames, and read-only `list`/`status` are undecided, unchanged from plan section 5. No test models real SQLite padding frames. |
-| T21 | Sandboxed schema-text fuzz target. Unblocked by Q8 (the authorizer exists) but not started. |
-| clippy | 5 warnings (style lints in lib, lib tests and `scenarios_failure`), 0 errors. |
-| fuzz corpus hygiene | `make fuzz` writes new inputs into `fuzz/corpus/<target>`, leaving untracked files in the checkout. Minimise them with `cmin` before committing any, or point local runs at a scratch corpus. |
+| `s20_leftover_meta_journal_does_not_break_reads` | Passes, but it was not verified that the crashed writer really leaves a `meta.db-journal`, so it may not exercise the hot-journal path. |
+| Q5 `--script` mode, `log` multi-line labels | Optional, not started. `log` prints a multi-line label raw, which breaks the table. |
+| Q6 merging padding frames | Decided: leave the parser alone. If ever wanted, do it in `wal::scan`, not in `capture`. |
+| CI | Workflows run green on GitHub (`ci` on every push). `actionlint` has still never been run on them. `ubuntu-latest` moves to Ubuntu 26 on 2026-10-19; watch the first run after that. |
+| T21 nightly | `exec_sql` hit libFuzzer's 30 s timeout three times in `fsync` while the machine was loaded; not reproducible. If nightly CI sees it, build the fuzz crate's SQLite with `LIBSQLITE3_FLAGS=-DSQLITE_NO_SYNC`. |
+| clippy | A handful of style warnings (lib, lib tests, `scenarios_failure`), 0 errors. `cargo fmt --check` fails on pre-existing code in `src/db.rs`. |
+| fuzz corpus hygiene | `make fuzz` writes new inputs into `fuzz/corpus/<target>`, leaving untracked files. Minimise with `cmin` before committing any, or point local runs at a scratch corpus. |
 
 Known limits (documented, by design):
 - A writer that does not use walflip's locks can commit between a statement's commit and its capture. `exec` captures everything and fails with "statement produced N commits".
@@ -40,10 +41,10 @@ Known limits (documented, by design):
 
 ```sh
 export PATH="/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:$PATH"
-cargo test --features testing        # 130 pass, 3 ignored (INV-08, perf per-process, fuzz_seed generator)
-cargo test --features testing --no-fail-fast -- --ignored   # INV-08 fails (expected); the other 2 pass
+cargo test --features testing        # 142 pass, 2 ignored (perf per-process, fuzz_seed generator)
+cargo test --features testing --no-fail-fast -- --ignored   # both pass
 cargo +nightly fuzz build
-make fuzz-replay                     # all 5 corpora, -runs=0
+make fuzz-replay                     # all 6 corpora, -runs=0
 ```
 
 The `fuzz_seed` generator writes into `fuzz/corpus` unless `WALFLIP_SEED_OUT` is set, so set it
@@ -71,7 +72,8 @@ Per-suite commands (`--features testing --test <name>`):
 
 Fuzz: `make fuzz` (30 s per target), `make fuzz-replay` (corpus regression), `./scripts/fuzz-seed.sh`
 (regenerate seeds). Targets: `wal_parse`, `wal_differential`, `replay_apply`, `store_capture`,
-`statements_split`. Triage procedure: `fuzz/README.md`.
+`statements_split`, `exec_sql` (T21: structured programs through the real `create`/`exec`, with a
+fuzz-only sandbox hook behind the `testing` feature). Triage procedure: `fuzz/README.md`.
 
 ## Decisions (2026-10-14; supersede plan section 5 defaults where they differ)
 
