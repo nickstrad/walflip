@@ -14,8 +14,10 @@ Typical uses:
 
 ## Install
 
-Requires a Rust toolchain (1.85+, the minimum for the `clap` version in `Cargo.lock`) and a
-Unix-like OS. SQLite is bundled.
+Requires a Rust toolchain (1.85+, the minimum for the `clap` version in `Cargo.lock`; declared as
+`rust-version` in `Cargo.toml`) and a Unix-like OS. SQLite is bundled. Building and running
+walflip works on 1.85; running the test suite needs Rust 1.88+, because the `proptest` dev-dependency
+in `Cargo.lock` requires it.
 
 ```sh
 git clone https://github.com/nickstrad/walflip.git
