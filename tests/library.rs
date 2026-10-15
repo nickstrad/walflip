@@ -170,7 +170,7 @@ fn s9a_vacuum_into_is_denied_and_creates_no_file() {
         let (obs, hashes) = (Observed::of(&d), FileHashes::of(&d.dir));
         let err = format!(
             "{:#}",
-            db::exec(&d, &[sql.clone()]).expect_err("VACUUM INTO must fail")
+            db::exec(&d, std::slice::from_ref(sql)).expect_err("VACUUM INTO must fail")
         );
         if i < 2 {
             assert!(

@@ -206,7 +206,7 @@ fn le32(b: &[u8]) -> u32 {
 /// SQLite's WAL checksum: a Fibonacci-style running sum over 8-byte chunks.
 fn checksum(big_endian: bool, data: &[u8], mut s0: u32, mut s1: u32) -> (u32, u32) {
     let rd = if big_endian { be32 } else { le32 };
-    for c in data.chunks_exact(8) {
+    for c in data.as_chunks::<8>().0 {
         s0 = s0.wrapping_add(rd(&c[0..4])).wrapping_add(s1);
         s1 = s1.wrapping_add(rd(&c[4..8])).wrapping_add(s0);
     }

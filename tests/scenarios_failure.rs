@@ -128,9 +128,11 @@ fn batch_fails(driver: Driver, text: &str, ok: usize, want_err: &str) {
     let seed = ins("seed");
     let n = match driver {
         Driver::Cli => h.exec(name, &seed),
-        Driver::Lib => {
-            db::exec(&Db::existing(&root, name).unwrap(), &[seed.clone()]).unwrap() as u64
-        }
+        Driver::Lib => db::exec(
+            &Db::existing(&root, name).unwrap(),
+            std::slice::from_ref(&seed),
+        )
+        .unwrap() as u64,
     };
     m.exec(&seed, n);
 
@@ -175,9 +177,11 @@ fn batch_fails(driver: Driver, text: &str, ok: usize, want_err: &str) {
     let after = ins("after");
     let n = match driver {
         Driver::Cli => parse_captured(&h.ok(&["--db", name, "exec", &after])),
-        Driver::Lib => {
-            db::exec(&Db::existing(&root, name).unwrap(), &[after.clone()]).unwrap() as u64
-        }
+        Driver::Lib => db::exec(
+            &Db::existing(&root, name).unwrap(),
+            std::slice::from_ref(&after),
+        )
+        .unwrap() as u64,
     };
     m.exec(&after, n);
     assert_invariants(&root, name, Some(&m), Checks::full());

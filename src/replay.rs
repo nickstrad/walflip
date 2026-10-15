@@ -90,7 +90,7 @@ mod tests {
                 match model.get(&p) {
                     Some(d) => want.extend_from_slice(d),
                     None if start + PS <= base.len() => want.extend_from_slice(&base[start..start + PS]),
-                    None => want.extend(std::iter::repeat(0).take(PS)),
+                    None => want.extend(std::iter::repeat_n(0, PS)),
                 }
             }
             prop_assert_eq!(got, want);
@@ -125,7 +125,7 @@ mod tests {
         fn bound_is_enforced(base in base(), f in frames(), max in 1u32..10, db in prop::option::of(1u32..12)) {
             let mut got = base.clone();
             let res = apply(&mut got, PS, refs(&f), db, max);
-            let over = f.iter().any(|(p, _)| *p > max) || db.map_or(false, |d| d > max);
+            let over = f.iter().any(|(p, _)| *p > max) || db.is_some_and(|d| d > max);
             if over {
                 prop_assert!(res.is_err());
                 prop_assert_eq!(got, base);
