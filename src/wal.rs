@@ -77,7 +77,7 @@ fn parse_header(buf: &[u8]) -> Result<Option<Header>> {
         m => bail!("bad WAL magic {m:#x}"),
     };
     let page_size = be32(&buf[8..12]);
-    if page_size < 512 || !page_size.is_power_of_two() {
+    if !(512..=65536).contains(&page_size) || !page_size.is_power_of_two() {
         bail!("bad WAL page size {page_size}");
     }
     let salt = (be32(&buf[16..20]), be32(&buf[20..24]));
@@ -754,11 +754,8 @@ mod tests {
         }
     }
 
-    // KNOWN FAILING: INV-08 -- the parser has no upper bound on page_size. This test expects
-    // page_size > 65536 (2^17..2^31) to be rejected with Err; today they are accepted
-    // (harmless, no frame can fit, but the plan calls for hardening).
+    // INV-08: page_size above 65536 (2^17..2^31) is rejected with Err.
     #[test]
-    #[ignore = "KNOWN FAILING: INV-08 parser lacks 65536 upper bound on page_size"]
     fn inv08_page_size_above_65536_is_rejected() {
         for shift in 17..=31 {
             let buf = enc(false, (1, 2), 1u32 << shift, &Vec::new());
