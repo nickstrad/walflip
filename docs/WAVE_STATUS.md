@@ -29,7 +29,6 @@ and implemented (see Decisions). Open items (same list as `docs/TESTING_PLAN.md`
 | Q6 merging padding frames | Decided: leave the parser alone. If ever wanted, do it in `wal::scan`, not in `capture`. |
 | CI | Workflows run green on GitHub (`ci` on every push). `actionlint` has still never been run on them. `ubuntu-latest` moves to Ubuntu 26 on 2026-10-19; watch the first run after that. |
 | T21 nightly | `exec_sql` hit libFuzzer's 30 s timeout three times in `fsync` while the machine was loaded; not reproducible. If nightly CI sees it, build the fuzz crate's SQLite with `LIBSQLITE3_FLAGS=-DSQLITE_NO_SYNC`. |
-| clippy | A handful of style warnings (lib, lib tests, `scenarios_failure`), 0 errors. `cargo fmt --check` fails on pre-existing code in `src/db.rs`. |
 | fuzz corpus hygiene | `make fuzz` writes new inputs into `fuzz/corpus/<target>`, leaving untracked files. Minimise with `cmin` before committing any, or point local runs at a scratch corpus. |
 
 Known limits (documented, by design):
