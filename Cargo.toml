@@ -8,6 +8,9 @@ anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 
+[features]
+testing = []
+
 [dev-dependencies]
 proptest = "1"
 tempfile = "3"

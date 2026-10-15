@@ -12,6 +12,7 @@ libfuzzer-sys = "0.4"
 
 [dependencies.walflip]
 path = ".."
+features = ["testing"]
 
 [[bin]]
 name = "wal_parse"
