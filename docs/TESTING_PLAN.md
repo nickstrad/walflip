@@ -37,7 +37,7 @@ Confirmed by running the debug binary while writing this plan (reproductions in 
 | B3 | Commits already in `live.db-wal` when `exec` starts (crashed writer, external writer) are captured under the label of the next statement, and `exec` reports more commits than statements. **Fixed (T16):** captured first as `(recovered)` with a stderr warning; `status` shows `uncaptured: N`. | medium |
 | B4 | Concurrent `exec` on one db (6 procs x 15 inserts): 11 failures `UNIQUE constraint failed: commits.idx`, 120 commits recorded for 90 rows, duplicated labels. The cursor is read outside the `meta.db` transaction. **Fixed (T16):** per-statement history lock (`BEGIN IMMEDIATE` on `meta.db`), capture inside it. | high |
 | B6 | `replay::apply` with a huge `pgno` or `db_pages` calls `Vec::resize` to terabytes: abort, not `Err`. Reachable from a crafted `meta.db`/WAL; the fuzzer will hit it immediately. **Fixed (T11).** | medium |
-| B10 | (found by T23) `summarize` builds `file:{path}?immutable=1` without escaping. `clone -o` to a path with `?`, `#` or `%` writes the file, then exits 1 (`unable to open database file`). With `%XX`, it could report on a different existing file. **Open.** | low |
+| B10 | (found by T23) `summarize` builds `file:{path}?immutable=1` without escaping. `clone -o` to a path with `?`, `#` or `%` writes the file, then exits 1 (`unable to open database file`). With `%XX`, it could report on a different existing file. **Fixed** (T25): `summarize` percent-encodes the path; tests `summarize_and_clone_handle_uri_special_paths` and `clone_to_uri_special_paths_reports_the_written_file`. | low |
 
 Also verified: `clone -n total` is **byte-identical** to `live.db` once the WAL is checkpointed, including after an external `VACUUM` shrank the db (16 -> 9 pages). This is the strongest oracle available and the harness is built around it.
 
@@ -117,7 +117,7 @@ Legend. Status: `ok` covered today, `gap` not tested, `FAIL` confirmed failing (
 | INV-49 | Concurrent `clone -n k` of the same db (same and different k) all succeed and are byte-identical per k. | spawn 8 processes | E | ok: `scenarios_concurrency::s12_concurrent_clones` (20/20 soak) |
 | INV-50 | `exec -` splits on lines: a multi-line statement fails with `incomplete input`, nothing committed, earlier lines kept. Documented behaviour. | e2e | E | ok: S10 |
 | INV-51 | `exec` with 2000 single-row inserts in one batch finishes in bounded time. Budget: < 10 s debug. | timed scenario S20 (batch runs by default; per-process run `#[ignore]`); `wal` proptests `resumed_parse_equals_full_parse_at_any_split`, `chained_resumes_*`, `resume_matches_full_parse_on_arbitrary_continuations`, `state_that_does_not_fit_is_refused`; `store` proptest `incremental_capture_equals_full_parse_capture` + fallback/migration units; `wal_differential` and `store_capture` fuzz oracles for resumed parsing | E/P/U/F | ok (T24: cursor stores a resume state (`cursor_resume`: header, offset, running checksum, commit count), capture parses only the new tail; batch 52.1 s -> 0.94 s debug) |
-| INV-63 | (added by T23) `clone -o <path>` works for any path the OS accepts, including `?`, `#`, `%`. The post-clone `summarize` opens exactly that file. | e2e: clone to `a?b.db`, `c#d.db`, `e%41.db` | E | **FAIL (B10)**: `summarize` passes an unescaped path in a `file:` URI. Reproduced by hand (exit 1 after the file is written). No test yet. |
+| INV-63 | (added by T23) `clone -o <path>` works for any path the OS accepts, including `?`, `#`, `%`. The post-clone `summarize` opens exactly that file. | e2e: clone to `a?b.db`, `c#d.db`, `e%41.db` | E | **PASS** (B10 fixed): path is percent-encoded before the immutable `file:` URI. Unit test `db::tests::summarize_and_clone_handle_uri_special_paths` and e2e `cli::clone_to_uri_special_paths_reports_the_written_file` (`?`, `#`, `%41`, space, unicode; decoy file untouched). |
 
 ### 1.5 Create / schema file
 
@@ -143,7 +143,7 @@ scenario is known-red. The only `#[ignore]`d test that fails is INV-08. These it
 | Item | State | Next step |
 |---|---|---|
 | INV-08 | `wal::parse` accepts page sizes 2^17..2^31. This is harmless (no frame fits), but `inv08_page_size_above_65536_is_rejected` is `#[ignore]` and red. | Add the upper bound to `wal.rs` and un-ignore the test, or document the behaviour and delete the test. |
-| INV-63 / B10 | `clone -o` to a path containing `?`, `#` or `%` writes the file, then exits 1. `db::summarize` puts the raw path in a `file:...?immutable=1` URI. | Percent-encode the path, or open with `SQLITE_OPEN_READ_ONLY` and no URI. Add an e2e test. |
+| INV-63 / B10 | `clone -o` to a path containing `?`, `#` or `%` writes the file, then exits 1. `db::summarize` puts the raw path in a `file:...?immutable=1` URI. | Percent-encode the path, or open with `SQLITE_OPEN_READ_ONLY` and no URI. Add an e2e test. **Done.** |
 | INV-10 | Sector-padding duplicate commit frames: Q6 is undecided and no test models real padding frames. | Decide Q6, then add an encoder-level padding case. |
 | INV-58 (exec side) | The `exec` refusal on a non-WAL `live.db` (`db::assert_wal`) has no test. | Add an e2e: switch `live.db` to DELETE mode externally, then `exec` must fail and change nothing. |
 | INV-56, INV-60 | Partial; see the rows. | Add the missing asserts to `scenarios_schema.rs`. |

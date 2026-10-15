@@ -17,12 +17,11 @@ everything so a fresh session can continue.
 
 ## Defects
 
-Defects B1-B9 from the plan are fixed, each with a regression test. T23 found B10, which is
-open. Open items (the same list as `docs/TESTING_PLAN.md` section 1.6):
+Defects B1-B10 from the plan are fixed, each with a regression test (B10 was found by T23 and
+fixed afterwards). Open items (the same list as `docs/TESTING_PLAN.md` section 1.6):
 
 | Item | State |
 |---|---|
-| B10 / INV-63 | `clone -o` to a path containing `?`, `#` or `%` writes the file, then exits 1: `db::summarize` puts the raw path into `file:{path}?immutable=1`. Low severity; documented in README Limitations. Fix in `src/db.rs`, with an e2e test. |
 | INV-08 | WAL page size above 65536 is accepted. `#[ignore]`d unit test that fails; harmless (zero frames fit). Decide: adopt the upper bound or document. |
 | INV-58 (exec side), INV-56, INV-60 | Partial coverage: the `exec` refusal on a non-WAL `live.db` is untested; empty schema vs no schema is not byte-compared; `base.db` sidecars and journal mode are not asserted. |
 | CI lint | `.github/workflows/*.yml` were never linted: `actionlint` was not installed for T20 or T23. Both files parse as YAML. Run `actionlint .github/workflows/*.yml`, and watch the first CI run. |

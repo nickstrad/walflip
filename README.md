@@ -133,8 +133,7 @@ with no SQL involved.
   database. Cloning an early commit of a long-lived database is cheap; cloning the latest commit
   of a heavily rewritten one may need several times the database size.
 - Page size is fixed at `create`; changing it afterwards is rejected at capture time.
-- `clone -o` paths must not contain `?`, `#` or `%` (known bug B10). The file is written,
-  but the integrity report that follows fails, and `clone` exits 1.
+
 
 ## Development
 

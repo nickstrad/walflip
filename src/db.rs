@@ -487,10 +487,29 @@ pub struct Summary {
     pub tables: Vec<(String, u64)>,
 }
 
+/// Percent-encode a path for a SQLite `file:` URI. Only unreserved characters and `/` stay
+/// literal, so no byte of the user path is interpreted as URI syntax. A relative path stays
+/// relative; a leading `//` is collapsed to one `/` so it is not read as an authority.
+fn uri_encode_path(path: &Path) -> String {
+    let mut out = String::new();
+    for &b in path.as_os_str().as_encoded_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => out.push(b as char),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    if out.starts_with("//") {
+        // `//` would start a URI authority; on POSIX it names the same file as one `/`.
+        out = format!("/{}", out.trim_start_matches('/'));
+    }
+    out
+}
+
 /// Open a db file read-only and report integrity plus per-table row counts.
 pub fn summarize(path: &Path) -> Result<Summary> {
     // immutable=1 so opening does not create -wal/-shm side files.
-    let uri = format!("file:{}?immutable=1", path.display());
+    // The path is percent-encoded so `?`, `#` and `%` are literal file name bytes.
+    let uri = format!("file:{}?immutable=1", uri_encode_path(path));
     let conn = Connection::open_with_flags(
         uri,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
@@ -552,6 +571,25 @@ mod tests {
         let s = summarize(&out).unwrap();
         assert_eq!(s.integrity, "ok");
         assert!(s.tables.contains(&(r#"a"b"#.to_string(), 2)), "{:?}", s.tables);
+    }
+
+    #[test]
+    fn summarize_and_clone_handle_uri_special_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = Db::new(tmp.path(), "uri").unwrap();
+        create(&d, Some("CREATE TABLE t(x); INSERT INTO t VALUES (1);")).unwrap();
+        // A decoy that a `%41` in a name would resolve to if the path were URI-decoded.
+        let decoy = tmp.path().join("eA.db");
+        let other = Db::new(tmp.path(), "other").unwrap();
+        create(&other, Some("CREATE TABLE decoy(x);")).unwrap();
+        clone_at(&other, 0, &decoy).unwrap();
+        for name in ["a?b.db", "c#d.db", "e%41.db", "sp ace.db", "u\u{e9}\u{4e2d}.db", "q?immutable=0#.db", "100%.db"] {
+            let out = tmp.path().join(name);
+            clone_at(&d, 0, &out).unwrap();
+            let s = summarize(&out).unwrap();
+            assert_eq!(s.integrity, "ok", "{name}");
+            assert_eq!(s.tables, vec![("t".to_string(), 1)], "{name}");
+        }
     }
 
     #[test]

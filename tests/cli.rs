@@ -498,3 +498,21 @@ fn log_defaults_to_most_recent_ascending_with_head_and_all() {
     assert_eq!(log(&["--limit", "0"]), Vec::<u64>::new(), "--limit 0 prints only the header");
     assert!(h.err(&["--db", "notes", "log", "--head", "--all"]).contains("cannot be used"));
 }
+
+/// INV-63 / B10: `clone -o` to paths with URI-special characters writes the file and reports
+/// on exactly that file (never a `%XX`-decoded neighbour).
+#[test]
+fn clone_to_uri_special_paths_reports_the_written_file() {
+    let h = Harness::new();
+    h.create("notes", NOTES);
+    h.exec("notes", "INSERT INTO notes(body) VALUES('x')");
+    let decoy = h.path("eA.db");
+    fs::write(&decoy, b"not a database").unwrap();
+    for name in ["a?b.db", "c#d.db", "e%41.db", "sp ace.db", "caf\u{e9}-\u{4e2d}.db", "f?immutable=0#g%3F.db"] {
+        let out = h.path(name);
+        let o = h.ok(&["--db", "notes", "clone", "-n", "1", "-o", out.to_str().unwrap()]);
+        assert!(o.contains("integrity_check: ok") && o.contains("notes: 1 rows"), "{name}: {o}");
+        assert!(out.exists(), "{name}");
+    }
+    assert_eq!(fs::read(&decoy).unwrap(), b"not a database");
+}
