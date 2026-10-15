@@ -1,5 +1,9 @@
 # Wave status
 
+**Project state (2026-10-15): all waves (W1-W6) are complete and merged to `main`.** Defects
+B1-B10 are fixed, all decisions are implemented, CI is green, and the fuzz corpus is minimised.
+Nothing is required. The open items below are optional follow-ups or things to watch.
+
 Source of truth for tasks, invariants and ownership rules: `docs/TESTING_PLAN.md`
 (section 4 task table, section 4.1 waves). This file records progress, decisions and how to run
 everything so a fresh session can continue.
@@ -14,33 +18,47 @@ everything so a fresh session can continue.
 | W4 | T13 B1 quoting + B9 clone race, T15 schema-before-WAL + authorizer (B5/B7/B8, Q7/Q8), T14 reject transaction control (B2, Q2), T16 writer lock + `(recovered)` pre-capture (B4/B3, Q1), T24 incremental capture (INV-51), T20 CI workflows, Q9 `log` default | merged |
 | W6 | B10 percent-encoded clone path, CI seed-script fix (green on GitHub), INV-08 page-size bound, Q4 `exec VACUUM`, Q5 (keep line splitting, docs), Q6 (pin padding behaviour, leave parser), Q11 `Store::open_existing`, T21 `exec_sql` fuzz target | merged |
 | W5 | T23 final review: re-ran everything and reconciled the plan's status cells (INV, S1-S20, T01-T24) with the tests. Results are at the top of `docs/TESTING_PLAN.md`. | docs only; found B10 |
+| final | INV-56/58(exec)/60 asserts, S20 hot-journal proof, Q5 `exec --script` + one-row `log` labels, CI pinned to `ubuntu-24.04` + fuzz `SQLITE_NO_SYNC`, actionlint, fmt/clippy clean, MSRV 1.85 declared, fuzz corpus minimised | merged |
 | extra | `docs/architecture/` C4 viewer built with c4-sdk | `cd docs/architecture && npm install && npm run dev` (Node 22.23.2) |
 
 ## Defects
 
 Defects B1-B10 are fixed, each with a regression test. Questions Q1-Q9, Q11 and INV-08 are decided
-and implemented (see Decisions). Open items (same list as `docs/TESTING_PLAN.md` section 1.6):
+and implemented (see Decisions). INV-56/58/60 are fully asserted, the S20 hot-journal test is proven
+to leave a real `meta.db-journal`, Q5 (`exec --script`, one-row `log` labels) is done, both
+workflows pass `actionlint`, CI runs on a pinned `ubuntu-24.04`, fuzz builds use
+`SQLITE_NO_SYNC`, `cargo fmt` and `cargo clippy --features testing --all-targets` are clean, and
+the MSRV is declared (`rust-version = "1.85"`; the test suite needs 1.88 because of `proptest`).
+
+Open items, all optional (same list as `docs/TESTING_PLAN.md` section 1.6):
 
 | Item | State |
 |---|---|
-| INV-58 (exec side), INV-56, INV-60 | Partial coverage: the `exec` refusal on a non-WAL `live.db` is untested; empty schema vs no schema is not byte-compared; `base.db` sidecars and journal mode are not asserted. |
-| `s20_leftover_meta_journal_does_not_break_reads` | Passes, but it was not verified that the crashed writer really leaves a `meta.db-journal`, so it may not exercise the hot-journal path. |
-| Q5 `--script` mode, `log` multi-line labels | Optional, not started. `log` prints a multi-line label raw, which breaks the table. |
-| Q6 merging padding frames | Decided: leave the parser alone. If ever wanted, do it in `wal::scan`, not in `capture`. |
-| CI | Workflows run green on GitHub (`ci` on every push). `actionlint` has still never been run on them. `ubuntu-latest` moves to Ubuntu 26 on 2026-10-19; watch the first run after that. |
-| T21 nightly | `exec_sql` hit libFuzzer's 30 s timeout three times in `fsync` while the machine was loaded; not reproducible. If nightly CI sees it, build the fuzz crate's SQLite with `LIBSQLITE3_FLAGS=-DSQLITE_NO_SYNC`. |
-| fuzz corpus hygiene | `make fuzz` writes new inputs into `fuzz/corpus/<target>`, leaving untracked files. Minimise with `cmin` before committing any, or point local runs at a scratch corpus. |
+| T21 nightly `exec_sql` timeout | `exec_sql` once hit libFuzzer's 30 s timeout in `fsync` on a loaded machine. Fuzz builds now use `SQLITE_NO_SYNC`; watch the nightly `fuzz.yml` runs to confirm it does not come back. |
+| `SQLITE_NO_SYNC` effect | Verified only indirectly (build flag reaches libsqlite3-sys, no timeouts since). No test proves fsync is a no-op in fuzz builds. |
+| Ubuntu 26 runner | CI is pinned to `ubuntu-24.04`. Moving to Ubuntu 26 is a future, deliberate change: bump the pin and watch the first run. |
+| fuzz crate lint | `cargo clippy` covers the main crate only; `fuzz/` is not clippy-linted. |
+| Tests on Rust 1.85 | The library builds on 1.85; tests need 1.88 (`proptest`). Whether the test code compiles on 1.85 with an older `proptest` is untried. |
+| `--script` splitting cost | `exec --script` re-runs `sqlite3_complete` on a growing prefix, so one statement containing many `;` (e.g. a long trigger body or string) splits in quadratic time. Fine for normal scripts. |
 
 Known limits (documented, by design):
 - A writer that does not use walflip's locks can commit between a statement's commit and its capture. `exec` captures everything and fails with "statement produced N commits".
 - If an outside writer's commits are checkpointed and the WAL restarted before any `exec` runs, those changes are in `live.db` but cannot be recovered into history.
 - Incremental capture assumes the WAL is append-only within a generation (bytes before the stored offset are not re-verified).
+- Sector-padding frames from a foreign writer appear as `(recovered)` commits (Q6: the parser is left alone; if merging is ever wanted, do it in `wal::scan`, not in `capture`).
+- `exec -` splits on lines, not on `;`; multi-line SQL needs `exec --script` (Q5).
+- Fuzzing writes new inputs into `fuzz/corpus/<target>`. Minimise with `-merge=1` against the committed seeds before committing any, and delete the rest.
 
 ## Verify the current state
 
 ```sh
 export PATH="/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:$PATH"
-cargo test --features testing        # 142 pass, 2 ignored (perf per-process, fuzz_seed generator)
+cargo test --features testing        # 155 pass, 2 ignored (perf per-process, fuzz_seed generator); needs Rust 1.88+
+# per suite: unit 71, cli 17, library 7, perf 1, roundtrip 3, concurrency 6, core 3, ddl 8,
+# failure 14, schema 15, usage 10
+cargo fmt --check
+cargo clippy --features testing --all-targets   # 0 warnings
+actionlint                           # both workflows clean
 cargo test --features testing --no-fail-fast -- --ignored   # both pass
 cargo +nightly fuzz build
 make fuzz-replay                     # all 6 corpora, -runs=0

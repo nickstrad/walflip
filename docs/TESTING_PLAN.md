@@ -135,16 +135,21 @@ Legend. Status: `ok` covered today, `gap` not tested, `FAIL` confirmed failing (
 | INV-61 | A schema containing `ATTACH` can write outside the root. Decide: allow (document) or deny (`SQLITE_DBCONFIG_DEFENSIVE` / authorizer denying `SQLITE_ATTACH`). Until decided, the fuzzer must never execute schema text. | e2e once decided | E | ok: denied in create and exec (T15, Q8): `s18_attach_in_schema`, `s18_exec_attach_and_journal_mode_are_denied`. Fuzzed by `exec_sql` (T21): ATTACH to an absolute and a relative canary path, `VACUUM INTO`, and ATTACH in token soup are always refused, and no file appears outside the case directory. |
 | INV-62 | Database names: accepted iff `[A-Za-z0-9_-]{1,64}`; path-like names rejected; `create` with an invalid name creates nothing. | existing `validate_name` tests + e2e | U/E | ok: `db::tests::rejects_path_like_names`, `accepted_names_are_safe_folder_names`, `cli::errors_are_clear_and_state_is_preserved` (`bad/name`) |
 
-### 1.6 Open items (after T23)
+### 1.6 Open items (2026-10-15, final)
 
-Defects B1-B9 are fixed, and each fix has the regression test named in its catalog row. No
-scenario is known-red. The only `#[ignore]`d test that fails is INV-08. These items are open:
+All waves are complete. Defects B1-B10 are fixed, and each fix has the regression test named in
+its catalog row. INV-08, INV-10, INV-56, INV-58, INV-60 and INV-63 are closed. No scenario is
+known-red. `cargo test --features testing`: 155 passed, 0 failed, 2 ignored; both ignored tests
+pass with `--ignored`. The items below are optional (same list as `docs/WAVE_STATUS.md`):
 
 | Item | State | Next step |
 |---|---|---|
-| INV-08 | `wal::parse` accepts page sizes 2^17..2^31. This is harmless (no frame fits), but `inv08_page_size_above_65536_is_rejected` is `#[ignore]` and red. | Add the upper bound to `wal.rs` and un-ignore the test, or document the behaviour and delete the test. |
-| INV-63 / B10 | `clone -o` to a path containing `?`, `#` or `%` writes the file, then exits 1. `db::summarize` puts the raw path in a `file:...?immutable=1` URI. | Percent-encode the path, or open with `SQLITE_OPEN_READ_ONLY` and no URI. Add an e2e test. **Done.** |
-| INV-10 | Sector-padding duplicate commit frames: decided (leave) and pinned with a real-SQLite test. | None. |
+| T21 nightly `exec_sql` timeout | Seen once (fsync on a loaded machine) before fuzz builds used `SQLITE_NO_SYNC`. | Watch nightly `fuzz.yml`. |
+| `SQLITE_NO_SYNC` effect | Verified only indirectly (flag reaches libsqlite3-sys; no timeouts since). | Optional: a fuzz-build-only check that fsync is not called. |
+| Ubuntu 26 runner | CI is pinned to `ubuntu-24.04`. | Bump the pin deliberately later and watch the first run. |
+| fuzz crate lint | `fuzz/` is not clippy-linted. | Optional: run `cargo clippy` in `fuzz/`. |
+| Tests on Rust 1.85 | MSRV is 1.85; tests need 1.88 (`proptest`). Compiling the tests on 1.85 with an older `proptest` is untried. | Optional. |
+| `exec --script` splitting | One statement containing many `;` splits in quadratic time (`sqlite3_complete` on a growing prefix). | Optional: only if very large trigger bodies or strings matter. |
 
 Ignored tests that pass and are ignored on purpose: `perf::s20_2000_per_process_execs` (slow
 smoke test) and `fuzz_seed::generate_fuzz_seeds` (corpus generator).
