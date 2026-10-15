@@ -85,6 +85,12 @@ fuzz-only sandbox hook behind the `testing` feature). Triage procedure: `fuzz/RE
 | Q7 | Schema runs in rollback mode, then autocommit check, WAL switch, `wal` assert, checkpoint. `page_size`/`auto_vacuum` in a schema now take effect. `PRAGMA journal_mode` denied. | T15 |
 | Q8 | `ATTACH`/`DETACH` denied in `create` and `exec`. | T15 |
 | Q9 | `log` shows the most recent N, oldest to newest; `--head` for the first N, `--all` for everything. | Q9 task |
+| Q4 | `exec VACUUM` supported via a strict path: exactly `VACUUM` or `VACUUM main`, run in autocommit under the meta lock after the recovery capture; always one commit. `VACUUM INTO` and other forms refused. Known gap and cost documented. | Q4 task |
+| Q5 | Keep line-based `exec -` splitting (`sqlite3_complete` needs a trailing `;` and would break existing batches); README states the rule. | docs |
+| Q6 | Leave the parser alone; pin real SQLite padding (`?psow=0` foreign writer) with a test; padding frames appear as `(recovered)` commits, replay stays exact. | tests/library.rs |
+| Q11 | `Store::open_existing` (no create, no schema) for `list`/`status`/`log`/`clone`; `list` skips folders without `meta.db`. Not `OPEN_READ_ONLY` (breaks on a hot `meta.db-journal`). | Q11 task |
+| INV-08 | WAL header page size must be a power of two in 512..=65536. | wal.rs |
+| T21 | `exec_sql` fuzz target with a testing-only sandbox hook; production authorizer unchanged. | T21 |
 | B9 | `clone_at` opens output with `create_new(true)`. | T13 |
 | INV-51 | Cursor stores header, offset, running checksum (`cursor_resume`); capture parses only the new tail, full-parse fallback on any inconsistency. 2000-insert batch: 52 s -> 0.95 s debug. | T24 |
 
