@@ -3,6 +3,7 @@
 
 pub mod invariants;
 pub mod model;
+pub mod scenario;
 
 use rusqlite::{Connection, OpenFlags};
 use std::io::Write;
