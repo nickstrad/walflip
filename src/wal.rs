@@ -30,6 +30,151 @@ pub struct Wal<'a> {
     pub page_size: u32,
     pub salt: (u32, u32),
     pub commits: Vec<Commit<'a>>,
+    /// Where parsing can resume: just past the last commit frame accepted.
+    pub end: Resume,
+}
+
+/// Parser state at a commit boundary of one WAL generation, enough to continue parsing later
+/// from `offset` without re-reading the frames before it (see [`parse_from`]).
+///
+/// The state is tied to the exact 32-byte header (byte order, page size, salt and header checksum
+/// all come from it), so a WAL restart, which writes a new salt, never matches an old state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Resume {
+    pub header: [u8; WAL_HEADER],
+    /// File offset just past the last commit frame (`32` when the generation has no commit).
+    pub offset: u64,
+    /// The running checksum at `offset`: the stored checksum of the last commit frame, or the
+    /// header checksum when there is none.
+    pub cksum: (u32, u32),
+    /// Commits of this generation before `offset`.
+    pub commits: u64,
+}
+
+/// Byte order, page size and salt from a header that passed its checksum.
+#[derive(Clone, Copy)]
+struct Header {
+    big_endian: bool,
+    page_size: u32,
+    salt: (u32, u32),
+    cksum: (u32, u32),
+}
+
+impl Header {
+    fn frame_len(&self) -> usize {
+        FRAME_HEADER + self.page_size as usize
+    }
+}
+
+/// `Ok(None)` for a short buffer or a header checksum mismatch, `Err` for bad magic / page size.
+fn parse_header(buf: &[u8]) -> Result<Option<Header>> {
+    if buf.len() < WAL_HEADER {
+        return Ok(None);
+    }
+    let big_endian = match be32(&buf[0..4]) {
+        MAGIC_LE => false,
+        MAGIC_BE => true,
+        m => bail!("bad WAL magic {m:#x}"),
+    };
+    let page_size = be32(&buf[8..12]);
+    if page_size < 512 || !page_size.is_power_of_two() {
+        bail!("bad WAL page size {page_size}");
+    }
+    let salt = (be32(&buf[16..20]), be32(&buf[20..24]));
+    let cksum = checksum(big_endian, &buf[0..24], 0, 0);
+    if cksum != (be32(&buf[24..28]), be32(&buf[28..32])) {
+        return Ok(None);
+    }
+    Ok(Some(Header { big_endian, page_size, salt, cksum }))
+}
+
+impl Resume {
+    /// The state before the first frame of the generation that `header` starts.
+    fn start(header: &[u8], h: &Header) -> Self {
+        Self { header: header[..WAL_HEADER].try_into().unwrap(), offset: WAL_HEADER as u64, cksum: h.cksum, commits: 0 }
+    }
+
+    pub fn salt(&self) -> (u32, u32) {
+        (be32(&self.header[16..20]), be32(&self.header[20..24]))
+    }
+
+    /// The header this state belongs to, re-validated (a stored state may be damaged).
+    fn checked_header(&self) -> Option<Header> {
+        parse_header(&self.header).ok().flatten()
+    }
+
+    /// File offset the tail passed to [`parse_from`] must start at: the last commit frame (its
+    /// header is checked against the stored checksum), or `offset` when there is no commit yet.
+    pub fn tail_start(&self) -> u64 {
+        let frame_len = self.checked_header().map_or(0, |h| h.frame_len() as u64);
+        if self.offset > WAL_HEADER as u64 {
+            self.offset.saturating_sub(frame_len)
+        } else {
+            self.offset
+        }
+    }
+
+    /// Text form stored in `meta.db`: `v1 <header hex> <offset> <cksum0> <cksum1> <commits>`.
+    pub fn to_meta(&self) -> String {
+        let hex: String = self.header.iter().map(|b| format!("{b:02x}")).collect();
+        format!("v1 {hex} {} {} {} {}", self.offset, self.cksum.0, self.cksum.1, self.commits)
+    }
+
+    /// Inverse of [`Resume::to_meta`]; `None` for anything else.
+    pub fn from_meta(s: &str) -> Option<Self> {
+        let mut it = s.split(' ');
+        if it.next()? != "v1" {
+            return None;
+        }
+        let hex = it.next()?;
+        if hex.len() != 2 * WAL_HEADER || !hex.is_ascii() {
+            return None;
+        }
+        let mut header = [0u8; WAL_HEADER];
+        for (i, b) in header.iter_mut().enumerate() {
+            *b = u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).ok()?;
+        }
+        let offset = it.next()?.parse().ok()?;
+        let cksum = (it.next()?.parse().ok()?, it.next()?.parse().ok()?);
+        let commits = it.next()?.parse().ok()?;
+        if it.next().is_some() {
+            return None;
+        }
+        Some(Self { header, offset, cksum, commits })
+    }
+
+    /// True when this state is a commit boundary of the WAL whose first bytes are `header` and
+    /// whose bytes from [`Resume::tail_start`] on are `tail`, so [`parse_from`] can continue it.
+    /// Checks: identical header (same generation), a self-consistent state, the file reaching
+    /// `offset`, and the last commit frame there carrying this salt, a commit marker and exactly
+    /// the stored running checksum.
+    pub fn matches(&self, header: &[u8], tail: &[u8]) -> bool {
+        self.anchor(header, tail).is_some()
+    }
+
+    /// The validated header and where scanning starts inside `tail`.
+    fn anchor(&self, header: &[u8], tail: &[u8]) -> Option<(Header, usize)> {
+        if header.len() < WAL_HEADER || header[..WAL_HEADER] != self.header {
+            return None;
+        }
+        let h = self.checked_header()?;
+        let frame_len = h.frame_len() as u64;
+        let frames = self.offset.checked_sub(WAL_HEADER as u64)?;
+        if frames % frame_len != 0 || self.commits > frames / frame_len {
+            return None;
+        }
+        if frames == 0 {
+            return (self.commits == 0 && self.cksum == h.cksum).then_some((h, 0));
+        }
+        if self.commits == 0 || (tail.len() as u64) < frame_len {
+            return None;
+        }
+        let fh = &tail[..FRAME_HEADER];
+        let ok = be32(&fh[4..8]) != 0
+            && (be32(&fh[8..12]), be32(&fh[12..16])) == h.salt
+            && (be32(&fh[16..20]), be32(&fh[20..24])) == self.cksum;
+        ok.then_some((h, frame_len as usize))
+    }
 }
 
 fn be32(b: &[u8]) -> u32 {
@@ -52,53 +197,58 @@ fn checksum(big_endian: bool, data: &[u8], mut s0: u32, mut s1: u32) -> (u32, u3
 
 /// Returns `None` if the buffer holds no valid WAL header (empty / still being created).
 pub fn parse(buf: &[u8]) -> Result<Option<Wal<'_>>> {
-    if buf.len() < WAL_HEADER {
-        return Ok(None);
-    }
-    let big_endian = match be32(&buf[0..4]) {
-        MAGIC_LE => false,
-        MAGIC_BE => true,
-        m => bail!("bad WAL magic {m:#x}"),
-    };
-    let page_size = be32(&buf[8..12]);
-    if page_size < 512 || !page_size.is_power_of_two() {
-        bail!("bad WAL page size {page_size}");
-    }
-    let salt = (be32(&buf[16..20]), be32(&buf[20..24]));
-    let (mut s0, mut s1) = checksum(big_endian, &buf[0..24], 0, 0);
-    if (s0, s1) != (be32(&buf[24..28]), be32(&buf[28..32])) {
-        return Ok(None);
-    }
+    let Some(h) = parse_header(buf)? else { return Ok(None) };
+    Ok(Some(scan(&h, &buf[WAL_HEADER..], Resume::start(buf, &h))))
+}
 
-    let frame_len = FRAME_HEADER + page_size as usize;
+/// Continue parsing a WAL from a state returned by an earlier parse of the same generation.
+///
+/// `header` is the file's first 32 bytes and `tail` the file's bytes from `from.tail_start()` on.
+/// Returns only the commits after `from` (`end.commits` counts the whole generation), and the
+/// same result as [`parse`] of the whole file would give past `from`. `None` when `from` does not
+/// fit this WAL (see [`Resume::matches`]): the caller must then parse the whole file.
+pub fn parse_from<'a>(header: &[u8], tail: &'a [u8], from: &Resume) -> Option<Wal<'a>> {
+    let (h, skip) = from.anchor(header, tail)?;
+    Some(scan(&h, &tail[skip..], *from))
+}
+
+/// Read frames from `frames` (which starts at file offset `from.offset`) until the end of the
+/// buffer, a frame of another generation, or a checksum mismatch.
+fn scan<'a>(h: &Header, frames: &'a [u8], from: Resume) -> Wal<'a> {
+    let frame_len = h.frame_len();
+    let (mut s0, mut s1) = from.cksum;
+    let mut end = from;
     let mut commits = Vec::new();
     let mut pending = Vec::new();
-    let mut off = WAL_HEADER;
+    let mut off = 0;
 
-    while off + frame_len <= buf.len() {
-        let fh = &buf[off..off + FRAME_HEADER];
-        let page = &buf[off + FRAME_HEADER..off + frame_len];
+    while off + frame_len <= frames.len() {
+        let fh = &frames[off..off + FRAME_HEADER];
+        let page = &frames[off + FRAME_HEADER..off + frame_len];
         // Frames from a previous WAL generation carry different salts.
-        if (be32(&fh[8..12]), be32(&fh[12..16])) != salt {
+        if (be32(&fh[8..12]), be32(&fh[12..16])) != h.salt {
             break;
         }
         // Checksum covers the first 8 header bytes, then the page, chained from the prior frame.
-        let (c0, c1) = checksum(big_endian, &fh[0..8], s0, s1);
-        let (c0, c1) = checksum(big_endian, page, c0, c1);
+        let (c0, c1) = checksum(h.big_endian, &fh[0..8], s0, s1);
+        let (c0, c1) = checksum(h.big_endian, page, c0, c1);
         if (c0, c1) != (be32(&fh[16..20]), be32(&fh[20..24])) {
             break;
         }
         (s0, s1) = (c0, c1);
+        off += frame_len;
 
         pending.push(Frame { pgno: be32(&fh[0..4]), page });
         let db_pages = be32(&fh[4..8]);
         if db_pages != 0 {
             commits.push(Commit { frames: std::mem::take(&mut pending), db_pages });
+            end.offset = from.offset + off as u64;
+            end.cksum = (s0, s1);
+            end.commits += 1;
         }
-        off += frame_len;
     }
 
-    Ok(Some(Wal { page_size, salt, commits }))
+    Wal { page_size: h.page_size, salt: h.salt, commits, end }
 }
 
 /// Reference WAL encoder.
@@ -230,6 +380,172 @@ mod tests {
             let mut buf = encode(be, (3, 4), &Vec::new());
             buf.extend(tail);
             prop_assert!(parse(&buf).unwrap().is_some());
+        }
+    }
+
+    // ---- T24: resumed parsing (INV-51) ----
+
+    /// Resume from `from` against the whole buffer `buf`, slicing it as a capture would read it.
+    fn resume_on<'a>(buf: &'a [u8], from: &Resume) -> Option<Wal<'a>> {
+        let start = (from.tail_start() as usize).min(buf.len());
+        parse_from(&buf[..buf.len().min(WAL_HEADER)], &buf[start..], from)
+    }
+
+    /// Commits of `buf` read in pieces: parse `buf[..cuts[0]]`, then resume on each longer prefix.
+    fn parsed_in_pieces(buf: &[u8], cuts: &[usize]) -> Option<(Owned, Resume)> {
+        let w = parse(&buf[..cuts[0]]).ok()??;
+        let mut got = owned(&w);
+        let mut end = w.end;
+        for &cut in &cuts[1..] {
+            let w = resume_on(&buf[..cut], &end).expect("a prefix state fits every longer prefix");
+            assert_eq!(w.end.commits, end.commits + w.commits.len() as u64);
+            got.extend(owned(&w));
+            end = w.end;
+        }
+        Some((got, end))
+    }
+
+    fn with_tail(c: &Owned, tail: &[(u32, Vec<u8>)]) -> Owned {
+        let mut all = c.clone();
+        if !tail.is_empty() {
+            all.push((tail.to_vec(), 0)); // no commit marker: an unfinished transaction
+        }
+        all
+    }
+
+    proptest! {
+        /// parse(whole) == parse(prefix) + parse_from(whole, prefix.end), for any split point,
+        /// both byte orders, any salt, with or without an unfinished trailing transaction.
+        #[test]
+        fn resumed_parse_equals_full_parse_at_any_split(
+            be in any::<bool>(), salt in any::<(u32, u32)>(), c in commits(0),
+            tail in prop::collection::vec((1u32..8, page()), 0..3), cut in any::<prop::sample::Index>(),
+        ) {
+            let buf = encode(be, salt, &with_tail(&c, &tail));
+            let full = parse(&buf).unwrap().unwrap();
+            let cut = WAL_HEADER + cut.index(buf.len() - WAL_HEADER + 1);
+            let (got, end) = parsed_in_pieces(&buf, &[cut, buf.len()]).unwrap();
+            prop_assert_eq!(&got, &c);
+            prop_assert_eq!(end, full.end);
+            prop_assert_eq!(full.end.commits as usize, c.len());
+            prop_assert_eq!(full.end.offset as usize, buf.len() - tail.len() * (FRAME_HEADER + PS));
+        }
+
+        /// The same through several resumes in a row, as successive captures do.
+        #[test]
+        fn chained_resumes_equal_full_parse(
+            be in any::<bool>(), salt in any::<(u32, u32)>(), c in commits(0),
+            cuts in prop::collection::vec(any::<prop::sample::Index>(), 1..6),
+        ) {
+            let buf = encode(be, salt, &c);
+            let mut points: Vec<usize> = cuts.iter().map(|i| WAL_HEADER + i.index(buf.len() - WAL_HEADER + 1)).collect();
+            points.push(buf.len());
+            points.sort_unstable();
+            let (got, end) = parsed_in_pieces(&buf, &points).unwrap();
+            prop_assert_eq!(got, c);
+            prop_assert_eq!(end, parse(&buf).unwrap().unwrap().end);
+        }
+
+        /// Resuming on any byte string that starts with the parsed prefix gives what the full parse
+        /// gives after it, whatever follows (garbage, a stale generation, a cut frame).
+        #[test]
+        fn resume_matches_full_parse_on_arbitrary_continuations(
+            be in any::<bool>(), c in commits(0), cut in any::<prop::sample::Index>(),
+            garbage in prop::collection::vec(any::<u8>(), 0..1200), flip in any::<(prop::sample::Index, u8)>(),
+        ) {
+            let mut buf = encode(be, (5, 6), &c);
+            buf.extend(&garbage);
+            let cut = WAL_HEADER + cut.index(buf.len() - WAL_HEADER + 1);
+            let (mut got, state) = {
+                let p = parse(&buf[..cut]).unwrap().unwrap();
+                (owned(&p), p.end)
+            };
+            // Damage a byte at or after the resume point (never inside the parsed prefix).
+            let from = state.offset as usize;
+            if from < buf.len() {
+                let at = from + flip.0.index(buf.len() - from);
+                buf[at] ^= flip.1;
+            }
+            let full = parse(&buf).unwrap().unwrap();
+            let r = resume_on(&buf, &state).expect("prefix intact, so the state fits");
+            got.extend(owned(&r));
+            prop_assert_eq!(got, owned(&full));
+            prop_assert_eq!(r.end, full.end);
+        }
+
+        /// A state never fits another generation (new salt in the header), a file shorter than the
+        /// stored offset, or a different running checksum at the resume point.
+        #[test]
+        fn state_that_does_not_fit_is_refused(be in any::<bool>(), c in commits(1), salt2 in any::<(u32, u32)>(), d in 1u32..) {
+            let buf = encode(be, (1, 2), &c);
+            let end = parse(&buf).unwrap().unwrap().end;
+            prop_assert!(resume_on(&buf, &end).is_some());
+            // WAL restart: same layout, new salt.
+            prop_assume!(salt2 != (1, 2));
+            let other = encode(be, salt2, &c);
+            prop_assert!(resume_on(&other, &end).is_none());
+            // File shorter than the offset (each byte count below it).
+            prop_assert!(resume_on(&buf[..end.offset as usize - 1], &end).is_none());
+            // Stored checksum, offset or count do not describe this file.
+            let bad = Resume { cksum: (end.cksum.0.wrapping_add(d), end.cksum.1), ..end };
+            prop_assert!(resume_on(&buf, &bad).is_none());
+            // One frame back is never a commit frame carrying the final checksum (nor the header).
+            let bad = Resume { offset: end.offset - (FRAME_HEADER + PS) as u64, ..end };
+            prop_assert!(resume_on(&buf, &bad).is_none());
+            let bad = Resume { offset: end.offset + 1, ..end };
+            prop_assert!(resume_on(&buf, &bad).is_none());
+            let bad = Resume { commits: end.offset, ..end };
+            prop_assert!(resume_on(&buf, &bad).is_none());
+        }
+
+        #[test]
+        fn resume_meta_text_roundtrips(header in any::<[u8; 32]>(), offset in any::<u64>(), cksum in any::<(u32, u32)>(), commits in any::<u64>()) {
+            let r = Resume { header, offset, cksum, commits };
+            prop_assert_eq!(Resume::from_meta(&r.to_meta()), Some(r));
+        }
+
+        #[test]
+        fn arbitrary_state_and_bytes_never_panic(
+            header in prop::collection::vec(any::<u8>(), 0..40), tail in prop::collection::vec(any::<u8>(), 0..1200),
+            h in any::<[u8; 32]>(), offset in any::<u64>(), cksum in any::<(u32, u32)>(), commits in any::<u64>(),
+        ) {
+            let r = Resume { header: h, offset, cksum, commits };
+            let _ = r.tail_start();
+            let _ = parse_from(&header, &tail, &r);
+            let _ = Resume::from_meta(&String::from_utf8_lossy(&tail));
+        }
+    }
+
+    #[test]
+    fn empty_generation_resumes_from_the_header() {
+        for be in [false, true] {
+            let c: Owned = vec![one(1, 1, PS, 1), one(2, 2, PS, 2)];
+            let buf = encode(be, (8, 9), &c);
+            let empty = parse(&buf[..WAL_HEADER]).unwrap().unwrap();
+            assert_eq!((empty.end.offset, empty.end.commits), (WAL_HEADER as u64, 0));
+            assert_eq!(empty.end.tail_start(), WAL_HEADER as u64);
+            assert_eq!(owned(&resume_on(&buf, &empty.end).unwrap()), c);
+            // The header checksum is the chain seed: a state claiming another seed is refused.
+            let bad = Resume { cksum: (1, 1), ..empty.end };
+            assert!(resume_on(&buf, &bad).is_none());
+        }
+    }
+
+    #[test]
+    fn resume_meta_rejects_other_text() {
+        let r = parse(&encode(false, (1, 2), &vec![one(1, 1, PS, 1)])).unwrap().unwrap().end;
+        let good = r.to_meta();
+        assert_eq!(Resume::from_meta(&good), Some(r));
+        for bad in [
+            String::new(),
+            "v2".to_string() + &good[2..],
+            good.replacen("v1 ", "v1  ", 1),
+            good.clone() + " 1",
+            good[..good.len() - 2].to_string() + " x",
+            good.replacen(' ', " zz", 1),
+            "v1 é".to_string(),
+        ] {
+            assert_eq!(Resume::from_meta(&bad), None, "{bad:?}");
         }
     }
 

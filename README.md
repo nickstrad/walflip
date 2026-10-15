@@ -92,7 +92,9 @@ walflip-data/
    per-frame checksum chain, and commit markers. A frame whose `db_size` field is non-zero
    ends a transaction.
 3. Each commit's frames (page number and full page image) are stored in `meta.db`. A cursor
-   of WAL salts and commits seen makes capture idempotent and survives WAL restarts.
+   of WAL salts and commits seen makes capture idempotent and survives WAL restarts. It also
+   keeps the byte offset and running checksum of the last captured commit, so each capture
+   reads only the frames added since (falling back to a full parse if the WAL was rewritten).
 4. `clone` copies `base.db` and overwrites pages at `(pgno - 1) * page_size` with the
    stored images up to commit `N`, then resizes to the database size recorded by commit `N`.
 

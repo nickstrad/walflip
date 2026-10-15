@@ -13,6 +13,18 @@
 //!   so it must still accept them). When a mutation provably damages frame k, `hi` is the number
 //!   of commits whose frames are all `< k`.
 //!
+//! Resumed parsing (`wal::parse_from`, INV-51) is checked on every input, mutated or not:
+//!
+//! - split: parse `buf[..cut]`, resume on the whole `buf` from the returned state; the prefix
+//!   commits plus the resumed ones, and the final state, must equal the full parse exactly;
+//! - stale state: a state taken from a prefix of the *unmutated* WAL is applied to the mutated
+//!   one. If the mutation left everything before the state's offset intact, the resume must
+//!   succeed and equal the full parse past that offset; if the file is now shorter than the offset
+//!   or its header changed (truncation, header patch, a WAL restart), it must be refused.
+//!
+//! `Restart` writes a new generation (new salt) over the head of the WAL, as SQLite does after a
+//! checkpoint; the full parse must then return exactly the new generation.
+//!
 //! "Provably damaged" uses the fact that the WAL checksum step is a bijection of the running state
 //! for fixed data, and changes whenever a data word changes: a single altered word in the header or
 //! in a frame's first 8 bytes / page always changes the computed checksum, a changed stored
@@ -68,6 +80,8 @@ enum Mutation {
     ZeroChecksum { frame: usize },
     /// Overwrite a header field; `resum` recomputes the header checksum afterwards.
     PatchHeader { field: HeaderField, value: u32, resum: bool },
+    /// WAL restart: a new generation (salt xor `salt_xor`) written over the head of the file.
+    Restart { salt_xor: (u32, u32), commits: Vec<CommitSpec> },
 }
 
 #[derive(Arbitrary, Debug)]
@@ -79,6 +93,9 @@ struct Input {
     /// Frames after the last commit frame (an unfinished transaction); must be ignored.
     tail: Vec<FrameSpec>,
     mutation: Option<Mutation>,
+    /// Split points for the resumed-parse checks.
+    split: u32,
+    stale_split: u32,
 }
 
 type Commits = Vec<wal::encode::Commit>;
@@ -161,6 +178,8 @@ fuzz_target!(|input: Input| {
     }
     let mut buf = wal::encode::encode(input.big_endian, input.salt, ps as u32, &to_encode);
     assert_eq!(buf.len(), WAL_HEADER + n_frames * flen);
+    let original = buf.clone();
+    let mut restarted: Option<Commits> = None;
 
     let frame_at = |k: usize| WAL_HEADER + k * flen;
     let exact = Expect { lo: all, hi: all, extra_ok: false };
@@ -279,18 +298,38 @@ fuzz_target!(|input: Input| {
                 }
             }
         }
+        Some(Mutation::Restart { salt_xor, commits: specs }) if *salt_xor != (0, 0) => {
+            let salt = (input.salt.0 ^ salt_xor.0, input.salt.1 ^ salt_xor.1);
+            let new: Commits = specs
+                .iter()
+                .take(MAX_COMMITS)
+                .filter(|c| !c.frames.is_empty())
+                .map(|c| (frames(&c.frames, MAX_FRAMES_PER_COMMIT, ps), c.db_pages.max(1)))
+                .collect();
+            let head = wal::encode::encode(input.big_endian, salt, ps as u32, &new);
+            if buf.len() < head.len() {
+                buf.resize(head.len(), 0);
+            }
+            buf[..head.len()].copy_from_slice(&head);
+            restarted = Some(new);
+            exact // unused: the restart oracle below replaces the prefix oracle
+        }
         // Frame-indexed mutations on a WAL with too few frames are no-ops.
         Some(_) => exact,
     };
 
+    check_resume(&buf, &original, input.split, input.stale_split);
+    if let Some(new) = restarted {
+        // Old-generation frames left after the new ones carry the old salt: never admitted.
+        let w = wal::parse(&buf).expect("restart header is valid").expect("restart header is sealed");
+        assert!(owned(&w) == new, "restart: parse is not exactly the new generation");
+        return;
+    }
+
     // Must never panic, whatever the bytes.
     let parsed = wal::parse(&buf);
     let got: Commits = match &parsed {
-        Ok(Some(w)) => w
-            .commits
-            .iter()
-            .map(|c| (c.frames.iter().map(|f| (f.pgno, f.page.to_vec())).collect(), c.db_pages))
-            .collect(),
+        Ok(Some(w)) => owned(w),
         _ => Vec::new(),
     };
 
@@ -316,3 +355,52 @@ fuzz_target!(|input: Input| {
         assert_eq!(n, all);
     }
 });
+
+fn owned(w: &wal::Wal) -> Commits {
+    w.commits.iter().map(|c| (c.frames.iter().map(|f| (f.pgno, f.page.to_vec())).collect(), c.db_pages)).collect()
+}
+
+/// Resume from `from` against the whole file `buf`, reading it as a capture does.
+fn resume_on<'a>(buf: &'a [u8], from: &wal::Resume) -> Option<wal::Wal<'a>> {
+    let start = (from.tail_start() as usize).min(buf.len());
+    wal::parse_from(&buf[..buf.len().min(WAL_HEADER)], &buf[start..], from)
+}
+
+/// The resumed-parse oracle (see the module docs).
+fn check_resume(buf: &[u8], original: &[u8], split: u32, stale_split: u32) {
+    let Ok(Some(full)) = wal::parse(buf) else {
+        // No valid header now: no state can fit it.
+        let o = wal::parse(original).unwrap().unwrap();
+        let cut = WAL_HEADER + stale_split as usize % (original.len() - WAL_HEADER + 1);
+        let state = wal::parse(&original[..cut]).unwrap().unwrap().end;
+        assert!(resume_on(buf, &o.end).is_none() && resume_on(buf, &state).is_none(), "state fit a WAL without a valid header");
+        return;
+    };
+
+    // Split: any prefix of this very buffer.
+    let cut = WAL_HEADER + split as usize % (buf.len() - WAL_HEADER + 1);
+    let prefix = wal::parse(&buf[..cut]).expect("prefix of a valid header").expect("prefix has the header");
+    let rest = resume_on(buf, &prefix.end).expect("a state from a prefix fits the whole buffer");
+    let mut got = owned(&prefix);
+    got.extend(owned(&rest));
+    assert!(got == owned(&full), "prefix + resumed != full parse");
+    assert_eq!(rest.end, full.end, "resumed end state != full parse end state");
+    assert_eq!(rest.end.commits as usize, full.commits.len());
+
+    // Stale state from the unmutated WAL.
+    let cut = WAL_HEADER + stale_split as usize % (original.len() - WAL_HEADER + 1);
+    let state = wal::parse(&original[..cut]).unwrap().unwrap().end;
+    let first_diff = buf.iter().zip(original).position(|(a, b)| a != b).unwrap_or(buf.len().min(original.len()));
+    let resumed = resume_on(buf, &state);
+    if (buf.len() as u64) < state.offset || first_diff < WAL_HEADER {
+        assert!(resumed.is_none(), "state accepted by a shorter file or another header");
+    } else if first_diff as u64 >= state.offset {
+        let r = resumed.expect("prefix up to the state is intact, so the state must fit");
+        let all = owned(&full);
+        assert!(all.len() >= state.commits as usize, "full parse lost commits before an intact state");
+        assert!(owned(&r)[..] == all[state.commits as usize..], "stale resume != full parse past the state");
+        assert_eq!(r.end, full.end);
+    }
+    // A change inside the prefix (after the header) is outside the resume contract: the WAL is
+    // append-only within a generation. Only "no panic" is required there.
+}

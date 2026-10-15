@@ -1,9 +1,10 @@
-//! S20 perf smoke. Ignored by default; run with
-//! `cargo test --features testing --test perf -- --ignored --nocapture`.
+//! S20 perf smoke. The stdin batch runs by default (INV-51); the per-process run is ignored
+//! (2000 process spawns). Run both with
+//! `cargo test --features testing --test perf -- --include-ignored --nocapture`.
 //!
-//! Prints wall-clock timings and asserts only loose budgets. INV-51: a 2000-insert stdin batch
-//! finishes in bounded time (< 10 s in a debug build). The WAL is re-read per statement, so
-//! this is O(N * WAL) and the budget is the thing to watch.
+//! Prints wall-clock timings and asserts loose budgets. INV-51: a 2000-insert stdin batch
+//! finishes in bounded time (< 10 s in a debug build). Capture resumes from the WAL offset stored
+//! in the cursor (T24), so each statement reads only its own new frames, not the whole WAL.
 
 mod common;
 use common::{ints, Harness};
@@ -31,7 +32,6 @@ fn batch_script(start: usize, n: usize) -> String {
 }
 
 #[test]
-#[ignore = "perf smoke S20: run with --ignored --nocapture"]
 fn s20_stdin_batch_of_2000_inserts() {
     let h = Harness::new();
     schema(&h, "batch");

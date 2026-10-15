@@ -56,7 +56,7 @@ Legend. Status: `ok` covered today, `gap` not tested, `FAIL` confirmed failing (
 
 | ID | Invariant | Check | Tech | Status |
 |---|---|---|---|---|
-| INV-17 | Cursor: same salt -> stored count, different salt or junk -> 0. | existing | U/P | ok |
+| INV-17 | Cursor: same salt -> stored count, different salt or junk -> 0. The resume state (`cursor_resume`, T24) is used only while it agrees with `cursor_salt`/`cursor_commits` and fits the WAL (same 32-byte header, file reaches the offset, last commit frame carries the stored checksum); otherwise capture parses the whole WAL with the count cursor. A `meta.db` without it (pre-T24) migrates on the next capture. | existing + `store::tests::old_cursor_format_is_migrated`, `stale_or_damaged_resume_state_*`, `rewritten_wal_with_the_same_salt_*` | U/P | ok |
 | INV-18 | `capture` on the same WAL twice adds 0 the second time. | roundtrip | L | ok |
 | INV-19 | WAL grows from k to k+j commits -> `capture` adds exactly j, idx continues. | write `encode(...)` output to a temp WAL file, capture, extend file, capture again. | U | gap |
 | INV-20 | WAL restart (new salt, fewer frames than before) -> all commits of the new generation are added, none duplicated, cursor updated. | as INV-19 with two generations | U | gap |
@@ -95,7 +95,7 @@ Legend. Status: `ok` covered today, `gap` not tested, `FAIL` confirmed failing (
 | INV-48 | Concurrent readers on `live.db` (a held read transaction) during `exec`: exec succeeds, capture complete, no duplicates on the next `exec` even though the WAL was not checkpointed. | spawn `python3 -I`/rusqlite reader holding `BEGIN; SELECT` | E | ok: S14 |
 | INV-49 | Concurrent `clone -n k` of the same db (same and different k) all succeed and are byte-identical per k. | spawn 8 processes | E | gap |
 | INV-50 | `exec -` splits on lines: a multi-line statement fails with `incomplete input`, nothing committed, earlier lines kept. Documented behaviour. | e2e | E | ok: S10 |
-| INV-51 | `exec` with 2000 single-row inserts in one batch finishes in bounded time (WAL is re-read per statement: O(N * WAL)). Budget: < 10 s debug. | timed scenario, `#[ignore]` by default | E | gap |
+| INV-51 | `exec` with 2000 single-row inserts in one batch finishes in bounded time. Budget: < 10 s debug. | timed scenario S20 (batch runs by default; per-process run `#[ignore]`); `wal` proptests `resumed_parse_equals_full_parse_at_any_split`, `chained_resumes_*`, `resume_matches_full_parse_on_arbitrary_continuations`, `state_that_does_not_fit_is_refused`; `store` proptest `incremental_capture_equals_full_parse_capture` + fallback/migration units; `wal_differential` and `store_capture` fuzz oracles for resumed parsing | E/P/U/F | ok (T24: cursor stores a resume state (`cursor_resume`: header, offset, running checksum, commit count), capture parses only the new tail; batch 52.1 s -> 0.94 s debug) |
 
 ### 1.5 Create / schema file
 
@@ -121,7 +121,7 @@ Legend. Status: `ok` covered today, `gap` not tested, `FAIL` confirmed failing (
 
 Known-red scenarios currently merged as `#[ignore]` (T23 removes this list):
 
-- `tests/perf.rs::s20_stdin_batch_of_2000_inserts`: `#[ignore]`, 53.9 s debug vs 10 s INV-51 budget (no B-number; WAL re-read per statement).
+- ~~`tests/perf.rs::s20_stdin_batch_of_2000_inserts`~~: fixed in T24 (incremental capture), un-ignored; 0.94 s debug vs the 10 s INV-51 budget.
 - B9 (found by T12): `clone_at` checked `out.exists()` then wrote, so concurrent clones to one
   path could both succeed. Fixed in T13: `create_new(true)`; S12 asserts exactly one racer wins.
 
@@ -231,7 +231,7 @@ Each scenario asserts the full `assert_invariants` set after every step unless s
 | S17 | read-only output dir | `chmod 555` target dir; `clone` fails; no file; db hashes unchanged (skipped as root) | hashes | INV-36 |
 | S18 | schema file matrix | multi-statement + seed rows; stdin vs file (byte-identical `base.db`); empty file; syntax error; constraint violation in seed; `BEGIN/COMMIT`; unterminated `BEGIN`; `PRAGMA journal_mode=DELETE`; `PRAGMA page_size=8192`; `ATTACH` (asserts chosen policy) | `base.db == live.db` after create; folder absent after failures; `exec` after each successful create captures 1 commit | INV-52..INV-61 (B5 fails; B7/B8 per decision) |
 | S19 | seed script | existing scenario 11 plus `assert_invariants` with `Checks::light` (no per-k clone; 500 commits) | counts, `clone(500) == live` | INV-27, INV-31 |
-| S20 | perf smoke (`#[ignore]`) | 2000-insert stdin batch; 2000 per-process execs | wall-clock budget printed and asserted loosely | INV-51 |
+| S20 | perf smoke (batch runs by default since T24; per-process `#[ignore]`) | 2000-insert stdin batch; 2000 per-process execs | wall-clock budget printed and asserted loosely | INV-51 |
 
 ---
 
