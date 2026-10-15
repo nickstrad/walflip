@@ -15,6 +15,9 @@ test:
 # Coverage-guided fuzzing (needs nightly + cargo-fuzz); FUZZ_SECS per target
 FUZZ_SECS ?= 30
 FUZZ_TARGETS := wal_parse wal_differential replay_apply store_capture statements_split exec_sql
+# Fuzzing only: bundled SQLite without fsync (avoids libFuzzer timeouts stuck in fsync). Exported to the
+# fuzz recipes only; `make test`/`make build` never see it. See fuzz/README.md.
+fuzz fuzz-replay: export LIBSQLITE3_FLAGS = -DSQLITE_NO_SYNC
 fuzz:
 	@for t in $(FUZZ_TARGETS); do \
 	  extra=""; [ $$t = wal_parse ] && extra="-max_len=70000"; [ $$t = exec_sql ] && extra="-timeout=30"; \

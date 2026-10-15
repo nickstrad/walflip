@@ -5,7 +5,11 @@ on:
   workflow_dispatch:
 jobs:
   fuzz:
-    runs-on: ubuntu-latest
+    # Pinned: ubuntu-latest moves to Ubuntu 26 on 2026-10-19. Revisit when 24.04 nears EOL or on a deliberate bump.
+    runs-on: ubuntu-24.04
+    env:
+      # Fuzzing only: bundled SQLite without fsync (exec_sql hit the 30 s libFuzzer timeout stuck in fsync).
+      LIBSQLITE3_FLAGS: -DSQLITE_NO_SYNC
     timeout-minutes: 12
     strategy:
       fail-fast: false

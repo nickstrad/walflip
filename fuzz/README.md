@@ -13,6 +13,13 @@ only) adds pragma/function denials, length/depth limits, `SQLITE_LIMIT_ATTACHED=
 `DBCONFIG_DEFENSIVE` and a deterministic progress-handler budget. Run it with `-timeout=30`;
 `EXEC_SQL_TRACE=1` prints every exec call and its outcome (handy with `-runs=0` on a crash).
 
+Fuzz builds compile the bundled SQLite with `LIBSQLITE3_FLAGS=-DSQLITE_NO_SYNC` (read by
+libsqlite3-sys 0.30's build script), so fsync is a no-op; `exec_sql` otherwise hit the 30 s
+libFuzzer timeout stuck in fsync on a loaded machine. The Makefile fuzz targets, `fuzz.yml` and the
+`fuzz-build-replay` CI job set it; plain `cargo test`/release builds do not. Crash safety is not
+under test here, only logic, so durability is irrelevant. If you run `cargo +nightly fuzz` by hand,
+export it yourself: `export LIBSQLITE3_FLAGS=-DSQLITE_NO_SYNC`. Changing it rebuilds libsqlite3-sys.
+
     make fuzz FUZZ_SECS=60      # all targets, nightly + cargo-fuzz required
     make fuzz-replay            # replay committed corpora (-runs=0)
 
