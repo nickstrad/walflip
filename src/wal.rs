@@ -249,4 +249,228 @@ mod tests {
         let buf = crate::wal::encode::encode(true, (5, 6), 512, &commits);
         assert_eq!(parsed(&buf), commits);
     }
+
+    // ---- T10: INV-06..INV-09 ----
+
+    fn enc(be: bool, salt: (u32, u32), ps: u32, commits: &Owned) -> Vec<u8> {
+        super::encode::encode(be, salt, ps, commits)
+    }
+
+    fn one(pgno: u32, seed: u8, ps: usize, db: u32) -> (Vec<(u32, Vec<u8>)>, u32) {
+        (vec![(pgno, vec![seed; ps])], db)
+    }
+
+    fn put32(buf: &mut [u8], at: usize, v: u32) {
+        buf[at..at + 4].copy_from_slice(&v.to_be_bytes());
+    }
+
+    /// Re-seal the 32-byte header checksum after patching header fields.
+    fn reseal_header(buf: &mut [u8], be: bool) {
+        let (a, b) = checksum(be, &buf[0..24], 0, 0);
+        put32(buf, 24, a);
+        put32(buf, 28, b);
+    }
+
+    fn check_corruption(be: bool, c: &Owned, pos: usize, flip: u8) -> Result<(), TestCaseError> {
+        let mut buf = encode(be, (1, 2), c);
+        let pos = WAL_HEADER + pos % (buf.len() - WAL_HEADER);
+        buf[pos] ^= flip;
+        let got = parsed(&buf);
+        let damaged_frame = (pos - WAL_HEADER) / (FRAME_HEADER + PS);
+        let mut frames_before = 0;
+        let intact = c
+            .iter()
+            .take_while(|(f, _)| {
+                frames_before += f.len();
+                frames_before <= damaged_frame
+            })
+            .count();
+        prop_assert!(got.len() <= intact);
+        prop_assert_eq!(&got[..], &c[..got.len()]);
+        Ok(())
+    }
+
+    proptest! {
+        /// Big-endian twin of `corruption_cuts_history_at_the_damaged_frame`.
+        #[test]
+        fn corruption_cuts_history_at_the_damaged_frame_big_endian(c in commits(1), pos in any::<usize>(), flip in 1u8..=255) {
+            check_corruption(true, &c, pos, flip)?;
+        }
+
+        /// INV-06: a new generation (new salt) written over the head of an older one wins alone.
+        #[test]
+        fn inv06_stale_generation_tail_is_dropped(be in any::<bool>(), a in commits(2), seed in any::<u8>()) {
+            let gen_a = encode(be, (10, 20), &a);
+            let b: Owned = vec![one(1, seed, PS, 1)];
+            let gen_b = encode(be, (30, 40), &b);
+            prop_assert!(gen_b.len() < gen_a.len());
+            let mut buf = gen_a;
+            buf[..gen_b.len()].copy_from_slice(&gen_b);
+            let w = parse(&buf).unwrap().unwrap();
+            prop_assert_eq!(w.salt, (30, 40));
+            prop_assert_eq!(owned(&w), b);
+        }
+    }
+
+    #[test]
+    fn inv06_salt_mismatch_mid_file_stops_at_that_frame() {
+        for be in [false, true] {
+            let c: Owned = (1..=4).map(|i| one(i, i as u8, PS, i)).collect();
+            let mut buf = encode(be, (1, 2), &c);
+            let frame3 = WAL_HEADER + 2 * (FRAME_HEADER + PS);
+            put32(&mut buf, frame3 + 8, 99);
+            // Frame 4 is itself valid, but nothing after the break is admitted.
+            assert_eq!(parsed(&buf), c[..2].to_vec());
+        }
+    }
+
+    #[test]
+    fn inv06_valid_checksum_with_foreign_salt_is_rejected() {
+        // The frame checksum does not cover the salt fields, so patching only the salt
+        // leaves the chain intact; the salt check alone must reject the frame.
+        for be in [false, true] {
+            for which in [8usize, 12] {
+                let c: Owned = (1..=3).map(|i| one(i, 0x40 + i as u8, PS, i)).collect();
+                let mut buf = encode(be, (5, 6), &c);
+                let f2 = WAL_HEADER + (FRAME_HEADER + PS);
+                put32(&mut buf, f2 + which, 0xdead_beef);
+                assert_eq!(parsed(&buf), c[..1].to_vec());
+            }
+        }
+    }
+
+    #[test]
+    fn trailing_partial_frame_is_ignored() {
+        for be in [false, true] {
+            let c: Owned = vec![one(1, 1, PS, 1), one(2, 2, PS, 2)];
+            let full = encode(be, (1, 2), &c);
+            let frame_len = FRAME_HEADER + PS;
+            for keep in [1, FRAME_HEADER - 1, FRAME_HEADER, FRAME_HEADER + 100, frame_len - 1] {
+                let buf = &full[..full.len() - frame_len + keep];
+                assert_eq!(parsed(buf), c[..1].to_vec(), "be={be} keep={keep}");
+            }
+        }
+    }
+
+    #[test]
+    fn frames_after_last_commit_marker_are_dropped() {
+        for be in [false, true] {
+            let c: Owned = vec![
+                one(1, 1, PS, 1),
+                (vec![(2, vec![2; PS]), (3, vec![3; PS]), (4, vec![4; PS])], 4),
+            ];
+            let full = encode(be, (1, 2), &c);
+            let frame_len = FRAME_HEADER + PS;
+            // Drop the commit frame (the last one): two uncommitted frames remain.
+            let w = parse(&full[..full.len() - frame_len]).unwrap().unwrap();
+            assert_eq!(owned(&w), c[..1].to_vec());
+        }
+    }
+
+    #[test]
+    fn page_sizes_512_and_65536_roundtrip() {
+        for be in [false, true] {
+            for ps in [512u32, 1024, 4096, 65536] {
+                let c: Owned = vec![
+                    (vec![(1, vec![0xa5; ps as usize]), (2, vec![0x5a; ps as usize])], 2),
+                    one(1, 7, ps as usize, 2),
+                ];
+                let buf = enc(be, (11, 22), ps, &c);
+                let w = parse(&buf).unwrap().unwrap();
+                assert_eq!(w.page_size, ps);
+                assert_eq!(owned(&w), c, "be={be} ps={ps}");
+                let cut = &buf[..buf.len() - 1];
+                assert_eq!(parsed(cut), c[..1].to_vec());
+            }
+        }
+    }
+
+    #[test]
+    fn checksum_chain_continues_across_commits() {
+        // Same salts, same frame 2 content, different frame 1: frame 2's stored checksum
+        // is only valid inside its own chain.
+        for be in [false, true] {
+            let x: Owned = vec![one(1, 1, PS, 1), one(2, 9, PS, 2)];
+            let y: Owned = vec![one(1, 2, PS, 1), one(2, 9, PS, 2)];
+            let bx = encode(be, (3, 4), &x);
+            let by = encode(be, (3, 4), &y);
+            let frame_len = FRAME_HEADER + PS;
+            let f2 = WAL_HEADER + frame_len;
+            let mut spliced = bx.clone();
+            spliced[f2..f2 + frame_len].copy_from_slice(&by[f2..f2 + frame_len]);
+            assert_eq!(parsed(&bx), x);
+            assert_eq!(parsed(&spliced), x[..1].to_vec());
+            let mut spliced1 = bx.clone();
+            spliced1[WAL_HEADER..f2].copy_from_slice(&by[WAL_HEADER..f2]);
+            // Y's frame 1 is valid from the header, but X's frame 2 no longer chains from it.
+            assert_eq!(parsed(&spliced1), y[..1].to_vec());
+        }
+    }
+
+    #[test]
+    fn inv07_chain_not_starting_at_header_checksum_is_rejected_at_frame_one() {
+        for be in [false, true] {
+            let c: Owned = vec![one(1, 1, PS, 1), one(2, 2, PS, 2)];
+            // (a) Header cksum patched without re-sealing: header invalid -> None.
+            let mut buf = encode(be, (1, 2), &c);
+            let old = be32(&buf[24..28]);
+            put32(&mut buf, 24, old ^ 1);
+            assert!(parse(&buf).unwrap().is_none());
+            // (b) Header changed (ckpt_seq) and validly re-sealed: header parses, but frames
+            // were chained from the old header checksum, so frame 1 must be rejected.
+            let mut buf = encode(be, (1, 2), &c);
+            put32(&mut buf, 12, 5);
+            reseal_header(&mut buf, be);
+            let w = parse(&buf).unwrap().unwrap();
+            assert!(w.commits.is_empty(), "be={be}");
+        }
+    }
+
+    #[test]
+    fn inv08_page_size_bounds() {
+        for ps in [512u32, 1024, 2048, 4096, 8192, 16384, 32768, 65536] {
+            let buf = enc(false, (1, 2), ps, &Vec::new());
+            assert!(parse(&buf).unwrap().is_some(), "ps={ps} must be accepted");
+        }
+        for ps in [0u32, 1, 256, 511, 513, 1000, 3000, 65535, 65537] {
+            let buf = enc(false, (1, 2), ps, &Vec::new());
+            assert!(parse(&buf).is_err(), "ps={ps} must be rejected");
+        }
+    }
+
+    // KNOWN FAILING: INV-08 -- the parser has no upper bound on page_size. This test expects
+    // page_size > 65536 (2^17..2^31) to be rejected with Err; today they are accepted
+    // (harmless, no frame can fit, but the plan calls for hardening).
+    #[test]
+    #[ignore = "KNOWN FAILING: INV-08 parser lacks 65536 upper bound on page_size"]
+    fn inv08_page_size_above_65536_is_rejected() {
+        for shift in 17..=31 {
+            let buf = enc(false, (1, 2), 1u32 << shift, &Vec::new());
+            assert!(parse(&buf).is_err(), "page_size 2^{shift} must be rejected");
+        }
+    }
+
+    #[test]
+    fn inv09_header_checksum_mismatch_is_none_and_bad_magic_is_err() {
+        for be in [false, true] {
+            let c: Owned = vec![one(1, 1, PS, 1)];
+            let good = encode(be, (1, 2), &c);
+            assert!(parse(&good).unwrap().is_some());
+
+            for at in [24usize, 28] {
+                let mut b = good.clone();
+                b[at + 3] ^= 0x80;
+                assert!(parse(&b).unwrap().is_none(), "cksum at {at}");
+            }
+            let mut b = good.clone();
+            b[19] ^= 1;
+            assert!(parse(&b).unwrap().is_none());
+
+            let mut b = good.clone();
+            b[0] ^= 0xff;
+            assert!(parse(&b).is_err());
+        }
+        assert!(parse(&[]).unwrap().is_none());
+        assert!(parse(&[0x37, 0x7f, 0x06, 0x82]).unwrap().is_none());
+    }
 }
