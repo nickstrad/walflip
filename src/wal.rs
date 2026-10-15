@@ -101,23 +101,28 @@ pub fn parse(buf: &[u8]) -> Result<Option<Wal<'_>>> {
     Ok(Some(Wal { page_size, salt, commits }))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use proptest::prelude::*;
+/// Reference WAL encoder.
+///
+/// This is a test oracle: it is written independently of the parser (it only
+/// shares the checksum primitive and magic constants) so that parse(encode(x))
+/// can be checked against x. Compiled only for tests or the `testing` feature.
+#[cfg(any(test, feature = "testing"))]
+pub mod encode {
+    use super::{checksum, MAGIC_BE, MAGIC_LE};
 
-    const PS: usize = 512;
-    type Owned = Vec<(Vec<(u32, Vec<u8>)>, u32)>;
+    /// One commit: its frames as `(pgno, page)` plus the db size in pages
+    /// written on the commit (last) frame.
+    pub type Commit = (Vec<(u32, Vec<u8>)>, u32);
 
     fn put(out: &mut Vec<u8>, v: u32) {
         out.extend_from_slice(&v.to_be_bytes());
     }
 
-    /// Reference WAL writer, independent of the parser, used to generate valid input.
-    fn encode(big_endian: bool, salt: (u32, u32), commits: &Owned) -> Vec<u8> {
+    /// Encode a valid WAL image. Every page must be `page_size` bytes.
+    pub fn encode(big_endian: bool, salt: (u32, u32), page_size: u32, commits: &[Commit]) -> Vec<u8> {
         let mut out = Vec::new();
         put(&mut out, if big_endian { MAGIC_BE } else { MAGIC_LE });
-        for v in [3007000, PS as u32, 0, salt.0, salt.1] {
+        for v in [3007000, page_size, 0, salt.0, salt.1] {
             put(&mut out, v);
         }
         let (mut s0, mut s1) = checksum(big_endian, &out[0..24], 0, 0);
@@ -139,6 +144,19 @@ mod tests {
             }
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    const PS: usize = 512;
+    type Owned = Vec<(Vec<(u32, Vec<u8>)>, u32)>;
+
+    fn encode(big_endian: bool, salt: (u32, u32), commits: &Owned) -> Vec<u8> {
+        super::encode::encode(big_endian, salt, PS as u32, commits)
     }
 
     fn owned(w: &Wal) -> Owned {
@@ -222,5 +240,13 @@ mod tests {
         let buf = encode(false, (1, 1), &vec![(vec![(1, page.clone()), (2, page)], 2)]);
         let first_frame_only = &buf[..WAL_HEADER + FRAME_HEADER + PS];
         assert!(parsed(first_frame_only).is_empty());
+    }
+
+    #[test]
+    fn encoder_is_usable_via_public_path() {
+        let page = vec![9u8; 512];
+        let commits: Vec<crate::wal::encode::Commit> = vec![(vec![(1, page)], 1)];
+        let buf = crate::wal::encode::encode(true, (5, 6), 512, &commits);
+        assert_eq!(parsed(&buf), commits);
     }
 }
