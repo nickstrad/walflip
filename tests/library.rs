@@ -178,8 +178,8 @@ fn s11_statements() -> Vec<String> {
 
 #[test]
 fn s11_clone_chain() {
-    // Not `PRAGMA auto_vacuum=FULL`: `create` enables WAL before running the schema, which makes
-    // SQLite ignore auto_vacuum silently (see report), so the shrink comes from VACUUM instead.
+    // The shrink comes from an external VACUUM (auto_vacuum=FULL in the schema would also work
+    // now that `create` runs the schema before enabling WAL).
     let schema = "CREATE TABLE kv(k TEXT PRIMARY KEY, v BLOB);";
     let (tmp, root) = root_and_tmp();
     let d = create(&root, "chain", schema);

@@ -17,10 +17,7 @@ Confirmed by running the debug binary while writing this plan (reproductions in 
 | B2 | A statement containing `COMMIT` (`INSERT ...; COMMIT; INSERT ...;`) commits to `live.db`, `tx.commit()` then fails, capture never runs, the process closes and SQLite checkpoints the WAL. History has 0 commits while `live.db` has 2 rows; the next `exec` produces commit 1 whose page already holds 3 rows. Lost history. | high |
 | B3 | Commits already in `live.db-wal` when `exec` starts (crashed writer, external writer) are captured under the label of the next statement, and `exec` reports more commits than statements. | medium |
 | B4 | Concurrent `exec` on one db (6 procs x 15 inserts): 11 failures `UNIQUE constraint failed: commits.idx`, 120 commits recorded for 90 rows, duplicated labels. The cursor is read outside the `meta.db` transaction. | high |
-| B5 | A schema containing `PRAGMA journal_mode=DELETE` is accepted; `live.db` is left in rollback mode and every later `exec` reports `captured 0 commit(s)` forever. | high |
 | B6 | `replay::apply` with a huge `pgno` or `db_pages` calls `Vec::resize` to terabytes: abort, not `Err`. Reachable from a crafted `meta.db`/WAL; the fuzzer will hit it immediately. | medium |
-| B7 | `PRAGMA page_size=8192` / `PRAGMA auto_vacuum=FULL` in a schema are silently ignored (WAL mode is switched on before the schema runs, which initialises page 1). `create` reports 4096. | low / UX |
-| B8 | Schema with an unterminated `BEGIN` fails with `database table is locked` (from the checkpoint), not an "applying schema" message. Folder is cleaned up. | low |
 
 Also verified: `clone -n total` is **byte-identical** to `live.db` once the WAL is checkpointed, including after an external `VACUUM` shrank the db (16 -> 9 pages). This is the strongest oracle available and the harness is built around it.
 
@@ -121,13 +118,11 @@ Legend. Status: `ok` covered today, `gap` not tested, `FAIL` confirmed failing (
 
 1. INV-39/INV-37 (B2) lost history on `COMMIT` inside a statement: capture must run even when `tx.commit()` fails, or `exec` must reject statements that end the transaction (e.g. check `conn.is_autocommit()` before `tx.commit()`, then capture with a `(partial)` label).
 2. INV-24 (B4) concurrent exec: open the `meta.db` transaction with `BEGIN IMMEDIATE` *before* reading the cursor and the WAL, or hold a lock file in the db folder for the whole `exec`.
-3. INV-58 (B5) schema flips journal mode: after applying the schema, `PRAGMA journal_mode` must still be `wal`, else fail `create`; `exec` should assert it too.
 4. INV-25 (B3) uncaptured-commit labelling: capture before the first statement with label `(recovered)`.
 5. INV-15 (B6) replay allocation bound.
 
 Known-red scenarios currently merged as `#[ignore]` (T23 removes this list):
 
-- `tests/scenarios_schema.rs` journal_mode=DELETE case: KNOWN FAILING: B5, fixed by T15.
 - `tests/perf.rs::s20_stdin_batch_of_2000_inserts`: `#[ignore]`, 53.9 s debug vs 10 s INV-51 budget (no B-number; WAL re-read per statement).
 - `tests/scenarios_concurrency.rs::s13_concurrent_exec`: KNOWN FAILING: B4, fixed by T16.
 - `tests/scenarios_concurrency.rs::s15_writer_dies_mid_life`: KNOWN FAILING: B3, fixed by T16.

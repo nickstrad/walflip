@@ -123,22 +123,16 @@ fn s18_begin_commit_in_schema() {
 fn s18_unterminated_begin() {
     let h = Harness::new();
     let o = create_raw(&h, "ub", "BEGIN;\nCREATE TABLE t(id INTEGER PRIMARY KEY);\nINSERT INTO t VALUES(1);");
-    if o.status.success() {
-        // The open transaction is rolled back when the connection drops, so a successful
-        // create must still be internally consistent.
-        assert_base_is_live(&h, "ub");
-        assert_invariants(&h.root(), "ub", None, Checks::full());
-    } else {
-        assert_failed_clean(&h, "ub", &o);
-    }
+    assert_failed_clean(&h, "ub", &o);
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(err.contains("applying schema"), "error should say `applying schema`: {err}");
 }
 
 #[test]
-#[ignore = "KNOWN FAILING: B5, fixed by T15"]
 fn s18_journal_mode_delete_is_rejected() {
     let h = Harness::new();
     let o = create_raw(&h, "jm", "PRAGMA journal_mode=DELETE;\nCREATE TABLE t(id INTEGER);");
-    // B5: expected `create` to fail with "schema changed journal_mode" and leave no folder.
+    // `create` must fail mentioning journal_mode and leave no folder.
     assert_failed_clean(&h, "jm", &o);
     let err = String::from_utf8_lossy(&o.stderr);
     assert!(err.contains("journal_mode"), "error should mention journal_mode: {err}");
@@ -148,13 +142,15 @@ fn s18_journal_mode_delete_is_rejected() {
 fn s18_page_size_pragma() {
     let h = Harness::new();
     let o = create_raw(&h, "ps", "PRAGMA page_size=8192;\nCREATE TABLE t(id INTEGER);");
-    // DECISION: Q7. Current behaviour: the schema runs after WAL is enabled, so the page_size
-    // pragma is silently ignored and the db keeps the default page size. Revisit with Q7.
+    // Q7: the schema runs before WAL is enabled, so page_size takes effect.
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
     let out = h.ok(&["--db", "ps", "status"]);
-    assert!(out.contains("4096"), "expected default page size 4096 in status: {out}");
+    assert!(out.contains("8192"), "expected page size 8192 in status: {out}");
     assert_eq!(h.exec("ps", "CREATE TABLE u(a)"), 1);
     assert_invariants(&h.root(), "ps", None, Checks::full());
+    let c = h.path("ps_c1.db");
+    h.ok(&["--db", "ps", "clone", "--n", "1", "--out", c.to_str().unwrap()]);
+    assert_eq!(ints(&c, "PRAGMA page_size"), vec![8192]);
 }
 
 #[test]
@@ -165,11 +161,28 @@ fn s18_attach_in_schema() {
         "ATTACH DATABASE '{}' AS o;\nCREATE TABLE o.x(a);\nCREATE TABLE t(id INTEGER);",
         other.display()
     );
-    let out = create_raw(&h, "at", &schema);
-    // DECISION: Q8. Current behaviour: ATTACH is not denied; it runs during create and
-    // writes a file outside the db folder. Revisit with Q8 (authorizer denylist).
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    assert!(other.exists(), "attached file was created outside the db folder");
-    assert_base_is_live(&h, "at");
-    assert_invariants(&h.root(), "at", None, Checks::full());
+    let out = create_raw(&h, "zzq", &schema);
+    // Q8: ATTACH is denied by the authorizer; nothing is written outside the db folder.
+    assert_failed_clean(&h, "zzq", &out);
+    assert!(!other.exists(), "ATTACH created a file outside the db folder");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("ATTACH"), "error should mention ATTACH: {err}");
+}
+
+#[test]
+fn s18_exec_attach_and_journal_mode_are_denied() {
+    let h = Harness::new();
+    h.create("ex", "CREATE TABLE t(id INTEGER);");
+    let other = h.path("other_exec.db");
+    let sql = format!("ATTACH DATABASE '{}' AS o", other.display());
+    let out = h.run(&["--db", "ex", "exec", &sql]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("ATTACH"));
+    assert!(!other.exists());
+    let out = h.run(&["--db", "ex", "exec", "PRAGMA journal_mode=DELETE"]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("journal_mode"));
+    assert_eq!(h.commits("ex"), 0);
+    assert_eq!(h.exec("ex", "INSERT INTO t VALUES(1)"), 1);
+    assert_invariants(&h.root(), "ex", None, Checks::full());
 }

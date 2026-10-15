@@ -2,7 +2,9 @@
 
 use crate::{replay, store::Store};
 use anyhow::{bail, Context, Result};
+use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
 use rusqlite::{Connection, OpenFlags};
+use std::sync::{Arc, Mutex};
 use std::fs::{self, OpenOptions};
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
@@ -80,14 +82,66 @@ pub fn create(db: &Db, schema: Option<&str>) -> Result<Created> {
     Ok(Created { page_size: result? })
 }
 
+/// What the authorizer refused, so errors can name it (SQLite only says "not authorized").
+type Denied = Arc<Mutex<Option<String>>>;
+
+/// Install an authorizer that denies `ATTACH`, `DETACH` and `PRAGMA journal_mode`. Other pragmas
+/// (`page_size`, `auto_vacuum`, ...) and transaction control stay allowed; callers that need more
+/// denials can extend `deny_reason`.
+fn install_authorizer(conn: &Connection) -> Denied {
+    let denied: Denied = Arc::new(Mutex::new(None));
+    let slot = denied.clone();
+    conn.authorizer(Some(move |ctx: AuthContext<'_>| match deny_reason(&ctx.action) {
+        Some(reason) => {
+            *slot.lock().unwrap() = Some(reason);
+            Authorization::Deny
+        }
+        None => Authorization::Allow,
+    }));
+    denied
+}
+
+fn deny_reason(action: &AuthAction<'_>) -> Option<String> {
+    match action {
+        AuthAction::Attach { .. } => Some("ATTACH is not allowed".into()),
+        AuthAction::Detach { .. } => Some("DETACH is not allowed".into()),
+        AuthAction::Pragma { pragma_name, .. } if pragma_name.eq_ignore_ascii_case("journal_mode") => {
+            Some("PRAGMA journal_mode is not allowed (walflip manages WAL mode)".into())
+        }
+        _ => None,
+    }
+}
+
+/// Turn a failure into an error that names what the authorizer denied, if anything.
+fn with_denial<T>(r: rusqlite::Result<T>, denied: &Denied, what: String) -> Result<T> {
+    r.map_err(|e| match denied.lock().unwrap().take() {
+        Some(reason) => anyhow::Error::new(e).context(format!("{what}: {reason}")),
+        None => anyhow::Error::new(e).context(what),
+    })
+}
+
+fn assert_wal(conn: &Connection) -> Result<()> {
+    let mode: String = conn.pragma_query_value(None, "journal_mode", |r| r.get(0))?;
+    if mode != "wal" {
+        bail!("live.db is not in WAL mode (journal_mode is {mode})");
+    }
+    Ok(())
+}
+
 fn init_files(db: &Db, schema: Option<&str>) -> Result<u32> {
     let conn = Connection::open(&db.live)?;
+    // Schema first, in rollback mode, so page_size/auto_vacuum pragmas take effect.
+    if let Some(sql) = schema {
+        let denied = install_authorizer(&conn);
+        with_denial(conn.execute_batch(sql), &denied, "applying schema".into())?;
+        if !conn.is_autocommit() {
+            bail!("applying schema: schema left a transaction open (unterminated BEGIN)");
+        }
+        conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
+    }
     let mode: String = conn.pragma_update_and_check(None, "journal_mode", "WAL", |r| r.get(0))?;
     if mode != "wal" {
         bail!("could not enable WAL (got {mode})");
-    }
-    if let Some(sql) = schema {
-        conn.execute_batch(sql).context("applying schema")?;
     }
     // Fold the schema into the main file so base.db is a complete, WAL-free starting point.
     conn.pragma_update_and_check(None, "wal_checkpoint", "TRUNCATE", |_| Ok(()))?;
@@ -145,6 +199,8 @@ pub fn drop_db(db: &Db) -> Result<()> {
 pub fn exec(db: &Db, statements: &[String]) -> Result<usize> {
     let mut store = Store::open(&db.meta)?;
     let conn = Connection::open(&db.live)?;
+    assert_wal(&conn)?;
+    let denied = install_authorizer(&conn);
     // Stop SQLite from folding the WAL back into the db while we are still reading it.
     conn.pragma_update(None, "wal_autocheckpoint", 0)?;
 
@@ -152,7 +208,7 @@ pub fn exec(db: &Db, statements: &[String]) -> Result<usize> {
     let mut total = 0;
     for stmt in statements {
         let tx = conn.unchecked_transaction()?;
-        tx.execute_batch(stmt).with_context(|| format!("failed: {stmt}"))?;
+        with_denial(tx.execute_batch(stmt), &denied, format!("failed: {stmt}"))?;
         tx.commit()?;
         total += store.capture(&wal, stmt)?;
     }
@@ -299,6 +355,8 @@ mod tests {
         exec(&d, &[big]).unwrap();
         exec(&d, &["DROP TABLE a;".to_string()]).unwrap();
         let total = Store::open(&d.meta).unwrap().commit_count().unwrap();
+        let pages: Vec<u64> = log(&d, 10).unwrap().iter().map(|e| e.db_pages).collect();
+        assert!(pages.windows(2).any(|w| w[1] < w[0]), "db never shrank: {pages:?}");
         for n in 0..=total {
             let out = tmp.path().join(format!("c{n}.db"));
             clone_at(&d, n, &out).unwrap();
