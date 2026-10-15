@@ -20,3 +20,14 @@ path = "fuzz_targets/wal_parse.rs"
 test = false
 doc = false
 bench = false
+
+[dependencies.arbitrary]
+version = "1"
+features = ["derive"]
+
+[[bin]]
+name = "wal_differential"
+path = "fuzz_targets/wal_differential.rs"
+test = false
+doc = false
+bench = false

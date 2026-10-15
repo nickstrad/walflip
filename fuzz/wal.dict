@@ -1,0 +1,30 @@
+# libFuzzer dictionary for the WAL fuzz targets (pass with -dict=fuzz/wal.dict).
+# All integers big-endian, as they appear in a WAL file.
+
+# magic: little-endian checksums / big-endian checksums
+magic_le="\x37\x7f\x06\x82"
+magic_be="\x37\x7f\x06\x83"
+# same values in little-endian byte order (how `arbitrary` reads a u32 field)
+magic_le_rev="\x82\x06\x7f\x37"
+magic_be_rev="\x83\x06\x7f\x37"
+
+# file format version 3007000
+version="\x00\x2d\xe2\x18"
+
+# page sizes
+ps_512="\x00\x00\x02\x00"
+ps_1024="\x00\x00\x04\x00"
+ps_4096="\x00\x00\x10\x00"
+ps_65536="\x00\x01\x00\x00"
+
+# small salts / db_pages / pgno values
+u32_0="\x00\x00\x00\x00"
+u32_1="\x00\x00\x00\x01"
+u32_2="\x00\x00\x00\x02"
+u32_3="\x00\x00\x00\x03"
+u32_4="\x00\x00\x00\x04"
+u32_5="\x00\x00\x00\x05"
+u32_6="\x00\x00\x00\x06"
+u32_7="\x00\x00\x00\x07"
+u32_8="\x00\x00\x00\x08"
+u32_max="\xff\xff\xff\xff"
