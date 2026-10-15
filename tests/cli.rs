@@ -2,24 +2,40 @@
 //! the tool is used.
 
 mod common;
+use common::invariants::{assert_invariants, hash_file, Checks};
+use common::model::Model;
 use common::{ints, texts, Harness};
 
-/// Scenario 1: the whole database lifecycle through the CLI.
+/// Scenario 1: the whole database lifecycle through the CLI, with the full invariant set
+/// checked after every step.
 #[test]
 fn lifecycle_create_write_inspect_clone_rename_drop() {
     let h = Harness::new();
     assert!(h.ok(&["list"]).contains("no databases"));
 
-    let out = h.create("notes", "CREATE TABLE notes(id INTEGER PRIMARY KEY, body TEXT);");
+    let schema = "CREATE TABLE notes(id INTEGER PRIMARY KEY, body TEXT);";
+    let out = h.create("notes", schema);
     assert!(out.contains("created") && out.contains("page size 4096"));
     assert!(h.root().join("notes").join("live.db").exists());
     assert!(h.root().join("notes").join("base.db").exists());
     assert!(h.root().join("notes").join("meta.db").exists());
+    let mut model = Model::new(Some(schema));
+    assert_invariants(&h.root(), "notes", Some(&model), Checks::full());
 
     for body in ["first", "second", "third"] {
         let sql = format!("INSERT INTO notes(body) VALUES('{body}')");
-        assert!(h.ok(&["--db", "notes", "exec", &sql]).contains("captured 1 commit"));
+        let captured = h.exec("notes", &sql);
+        assert_eq!(captured, 1);
+        model.exec(&sql, captured);
+        assert_invariants(&h.root(), "notes", Some(&model), Checks::full());
     }
+    // A no-op and a failing statement leave history and contents unchanged.
+    let noop = "UPDATE notes SET body = 'x' WHERE id = 404";
+    model.exec(noop, h.exec("notes", noop));
+    assert!(h.err(&["--db", "notes", "exec", "INSERT INTO nope VALUES(1)"]).contains("failed:"));
+    model.failed("INSERT INTO nope VALUES(1)");
+    assert_invariants(&h.root(), "notes", Some(&model), Checks::full());
+
     assert_eq!(h.commits("notes"), 3);
     assert!(h.ok(&["list"]).contains("notes"));
 
@@ -30,13 +46,78 @@ fn lifecycle_create_write_inspect_clone_rename_drop() {
     let out = h.ok(&["--db", "notes", "clone", "-n", "2", "-o", two.to_str().unwrap()]);
     assert!(out.contains("integrity_check: ok") && out.contains("notes: 2 rows"));
     assert_eq!(texts(&two, "SELECT body FROM notes ORDER BY id"), ["first", "second"]);
+    let before_rename = assert_invariants(&h.root(), "notes", Some(&model), Checks::full());
+    let meta_hash = hash_file(&h.root().join("notes").join("meta.db"));
 
     h.ok(&["rename", "notes", "journal"]);
     assert_eq!(h.commits("journal"), 3, "history survives a rename");
     h.err(&["--db", "notes", "status"]);
+    assert_eq!(hash_file(&h.root().join("journal").join("meta.db")), meta_hash, "INV-43: rename changed meta.db");
+    let after_rename = assert_invariants(&h.root(), "journal", Some(&model), Checks::full());
+    assert_eq!(after_rename, before_rename, "INV-43: rename changed observed history");
 
     h.ok(&["drop", "journal"]);
+    assert!(!h.root().join("journal").exists(), "INV-43: drop left the folder");
     assert!(h.ok(&["list"]).contains("no databases"));
+}
+
+/// A db with a few commits plus its model, for the harness self-checks below.
+fn small_db() -> (Harness, Model) {
+    let h = Harness::new();
+    let schema = "CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT);";
+    h.create("d", schema);
+    let mut model = Model::new(Some(schema));
+    for i in 1..=4 {
+        let sql = format!("INSERT INTO t VALUES({i}, '{}')", "x".repeat(50 * i));
+        model.exec(&sql, h.exec("d", &sql));
+    }
+    assert_invariants(&h.root(), "d", Some(&model), Checks::full());
+    (h, model)
+}
+
+/// Run `assert_invariants` expecting it to panic; returns the panic message.
+fn invariants_panic(h: &Harness, model: Option<&Model>) -> String {
+    let root = h.root();
+    let err = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        assert_invariants(&root, "d", model, Checks::full());
+    }))
+    .expect_err("assert_invariants accepted a corrupted meta.db");
+    err.downcast_ref::<String>().cloned().or_else(|| err.downcast_ref::<&str>().map(|s| s.to_string())).unwrap()
+}
+
+fn corrupt_meta(h: &Harness, sql: &str, params: impl rusqlite::Params) {
+    let conn = rusqlite::Connection::open(h.root().join("d").join("meta.db")).unwrap();
+    assert_eq!(conn.execute(sql, params).unwrap(), 1, "corruption touched exactly one row");
+}
+
+/// Harness self-check: a deleted frames row is caught by the meta structure check.
+#[test]
+fn invariants_catch_a_deleted_frame() {
+    let (h, model) = small_db();
+    corrupt_meta(&h, "DELETE FROM frames WHERE commit_idx = 2 AND seq = 0", []);
+    let msg = invariants_panic(&h, Some(&model));
+    assert!(msg.contains("INV-22"), "unexpected message: {msg}");
+}
+
+/// Harness self-check: one flipped byte in a stored page is caught by the clone oracles.
+#[test]
+fn invariants_catch_a_flipped_page_byte() {
+    let (h, model) = small_db();
+    let meta = h.root().join("d").join("meta.db");
+    let (rowid, mut page): (i64, Vec<u8>) = rusqlite::Connection::open(&meta)
+        .unwrap()
+        .query_row("SELECT rowid, page FROM frames ORDER BY commit_idx DESC, seq DESC LIMIT 1", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .unwrap();
+    let at = page.len() - 100; // inside the cell content area at the end of the page
+    page[at] ^= 0x01;
+    corrupt_meta(&h, "UPDATE frames SET page = ?1 WHERE rowid = ?2", rusqlite::params![page, rowid]);
+    let msg = invariants_panic(&h, Some(&model));
+    assert!(msg.contains("INV-30"), "unexpected message: {msg}");
+    // Without a model the byte-for-byte oracle still catches it (integrity_check does not).
+    let msg = invariants_panic(&h, None);
+    assert!(msg.contains("INV-31"), "unexpected message: {msg}");
 }
 
 /// Scenario 2: bulk loading from stdin, then time travel to every point along the way.
