@@ -17,12 +17,17 @@ const BATCH_BUDGET: Duration = Duration::from_secs(10);
 const PER_PROCESS_CEILING: Duration = Duration::from_secs(600);
 
 fn schema(h: &Harness, name: &str) {
-    h.create(name, "CREATE TABLE t(id INTEGER PRIMARY KEY, v INTEGER NOT NULL);");
+    h.create(
+        name,
+        "CREATE TABLE t(id INTEGER PRIMARY KEY, v INTEGER NOT NULL);",
+    );
 }
 
 /// One statement per line; the batch reader treats each non-blank line as one statement.
 fn batch_script(start: usize, n: usize) -> String {
-    (start..start + n).map(|i| format!("INSERT INTO t(id, v) VALUES({i}, {})\n", i * 3)).collect()
+    (start..start + n)
+        .map(|i| format!("INSERT INTO t(id, v) VALUES({i}, {})\n", i * 3))
+        .collect()
 }
 
 #[test]
@@ -42,7 +47,10 @@ fn s20_stdin_batch_of_2000_inserts() {
         String::from_utf8_lossy(&out.stderr)
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains(&format!("captured {N} commit(s)")), "unexpected output: {stdout}");
+    assert!(
+        stdout.contains(&format!("captured {N} commit(s)")),
+        "unexpected output: {stdout}"
+    );
     assert_eq!(h.commits("batch"), N as u64);
 
     println!(
@@ -51,7 +59,10 @@ fn s20_stdin_batch_of_2000_inserts() {
         elapsed.as_secs_f64() * 1000.0 / N as f64,
         BATCH_BUDGET.as_secs_f64(),
     );
-    assert!(elapsed < BATCH_BUDGET, "INV-51: batch took {elapsed:?}, budget {BATCH_BUDGET:?}");
+    assert!(
+        elapsed < BATCH_BUDGET,
+        "INV-51: batch took {elapsed:?}, budget {BATCH_BUDGET:?}"
+    );
 }
 
 #[test]
@@ -62,13 +73,24 @@ fn s20_2000_per_process_execs() {
 
     let start = Instant::now();
     for i in 1..=N {
-        h.exec("procs", &format!("INSERT INTO t(id, v) VALUES({i}, {})", i * 3));
+        h.exec(
+            "procs",
+            &format!("INSERT INTO t(id, v) VALUES({i}, {})", i * 3),
+        );
     }
     let elapsed = start.elapsed();
 
     assert_eq!(h.commits("procs"), N as u64);
     let out = h.path("procs-final.db");
-    h.ok(&["--db", "procs", "clone", "-n", &N.to_string(), "-o", out.to_str().unwrap()]);
+    h.ok(&[
+        "--db",
+        "procs",
+        "clone",
+        "-n",
+        &N.to_string(),
+        "-o",
+        out.to_str().unwrap(),
+    ]);
     assert_eq!(ints(&out, "SELECT count(*) FROM t"), vec![N as i64]);
 
     println!(
@@ -76,5 +98,8 @@ fn s20_2000_per_process_execs() {
         elapsed.as_secs_f64(),
         elapsed.as_secs_f64() * 1000.0 / N as f64,
     );
-    assert!(elapsed < PER_PROCESS_CEILING, "per-process execs took {elapsed:?}");
+    assert!(
+        elapsed < PER_PROCESS_CEILING,
+        "per-process execs took {elapsed:?}"
+    );
 }
