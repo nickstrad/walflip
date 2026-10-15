@@ -14,8 +14,8 @@ Confirmed by running the debug binary while writing this plan (reproductions in 
 | # | Confirmed defect | Severity |
 |---|---|---|
 | B1 | `summarize` does not double `"` in table names: `exec 'CREATE TABLE "a""b"(x)'` then `clone` writes the file, then exits 1 (`unrecognized token`). | medium |
-| B3 | Commits already in `live.db-wal` when `exec` starts (crashed writer, external writer) are captured under the label of the next statement, and `exec` reports more commits than statements. | medium |
-| B4 | Concurrent `exec` on one db (6 procs x 15 inserts): 11 failures `UNIQUE constraint failed: commits.idx`, 120 commits recorded for 90 rows, duplicated labels. The cursor is read outside the `meta.db` transaction. | high |
+| B3 | Commits already in `live.db-wal` when `exec` starts (crashed writer, external writer) are captured under the label of the next statement, and `exec` reports more commits than statements. **Fixed (T16):** captured first as `(recovered)` with a stderr warning; `status` shows `uncaptured: N`. | medium |
+| B4 | Concurrent `exec` on one db (6 procs x 15 inserts): 11 failures `UNIQUE constraint failed: commits.idx`, 120 commits recorded for 90 rows, duplicated labels. The cursor is read outside the `meta.db` transaction. **Fixed (T16):** per-statement history lock (`BEGIN IMMEDIATE` on `meta.db`), capture inside it. | high |
 | B6 | `replay::apply` with a huge `pgno` or `db_pages` calls `Vec::resize` to terabytes: abort, not `Err`. Reachable from a crafted `meta.db`/WAL; the fuzzer will hit it immediately. | medium |
 
 Also verified: `clone -n total` is **byte-identical** to `live.db` once the WAL is checkpointed, including after an external `VACUUM` shrank the db (16 -> 9 pages). This is the strongest oracle available and the harness is built around it.
@@ -63,9 +63,9 @@ Legend. Status: `ok` covered today, `gap` not tested, `FAIL` confirmed failing (
 | INV-21 | WAL page size != stored page size -> `Err`, no rows inserted, cursor unchanged. | encode with PS=512 against a store whose `page_size` is 4096 | U | gap |
 | INV-22 | `commits.idx` is contiguous `1..=count`; every `frames.commit_idx` exists; per commit `seq` is contiguous from 0; `frames` count == `status.frames`. | SQL check in `assert_invariants` | E | gap |
 | INV-23 | `cursor_commits` == number of commits in the current WAL generation at last capture; `cursor_salt` == header salt. | library check after each `exec` while WAL still exists (hold a reader to prevent the close-checkpoint) | L | gap |
-| INV-24 | Capture is atomic under concurrent writers: N processes doing M statements each produce exactly N*M commits, no `UNIQUE` errors, labels match statements. | e2e concurrency scenario | E | FAIL (B4) |
-| INV-25 | Commits present in the WAL before `exec` runs its first statement are either captured with a distinct label (e.g. `(uncaptured)`) or `exec` refuses; they are never attributed to the new statement. | e2e: kill a writer with `os._exit`, then `exec` | E | FAIL (B3) |
-| INV-26 | A failed `capture` (meta tx error) leaves `commits`/`frames`/`meta` exactly as before. | unit with a read-only `meta.db` | U | gap |
+| INV-24 | Capture is atomic under concurrent writers: N processes doing M statements each produce exactly N*M commits, no `UNIQUE` errors, labels match statements. | e2e concurrency scenario | E | ok: S13 (T16; 20/20 soak), `db::tests::exec_fails_cleanly_*`, S15b (lock released on process death) |
+| INV-25 | Commits present in the WAL before `exec` runs its first statement are either captured with a distinct label (e.g. `(uncaptured)`) or `exec` refuses; they are never attributed to the new statement. | e2e: kill a writer with `os._exit`, then `exec` | E | ok: S15 (T16: label `(recovered)`, warning, `status` `uncaptured: N`), `db::tests::orphans_are_recovered_under_their_own_label` |
+| INV-26 | A failed `capture` (meta tx error) leaves `commits`/`frames`/`meta` exactly as before. | unit: failing trigger, page-size mismatch and SQLITE_BUSY, standalone and inside the write lock (savepoint) | U | ok: `store::tests::inv26_*` |
 
 ### 1.4 Database operations (`db::*`)
 
@@ -82,7 +82,7 @@ Legend. Status: `ok` covered today, `gap` not tested, `FAIL` confirmed failing (
 | INV-35 | `clone` to an existing path refuses and leaves that file byte-identical; `-n > total` refuses and creates nothing. | existing | E | ok |
 | INV-36 | `clone` into an unwritable directory -> non-zero exit, no partial file, db state unchanged. | chmod 0o555 dir (skip when root) | E | gap |
 | INV-37 | A failing statement changes nothing: live rows, `status`, WAL commit count, `meta.db` hash all unchanged. | harness | E | ok: S10 (`tests/scenarios_failure.rs`); transaction control in `exec` is rejected by the authorizer (Q2, T14) |
-| INV-38 | One `exec` statement produces at most one commit; a statement that writes nothing produces zero. | harness: `captured N` with N <= 1 per statement | E | ok (T14: `exec` errors after capturing when one statement yields >1 commit) / FAIL (B3: orphan WAL commits make the next statement yield 2, now an error, fixed by T16) |
+| INV-38 | One `exec` statement produces at most one commit; a statement that writes nothing produces zero. | harness: `captured N` with N <= 1 per statement | E | ok (T14: `exec` errors after capturing when one statement yields >1 commit, covered by `db::tests::backstop_more_than_one_commit_is_captured_then_reported`; T16: orphan WAL commits are captured as `(recovered)` before the statement, so they no longer count against it) |
 | INV-39 | Rows committed to `live.db` by `exec` are always represented in history: after any `exec` (success or error), `clone -n total` == `live.db` contents. | harness `assert_invariants` after failed steps too | E | ok: S10; backstop captures on the error path whenever the failed statement changed the WAL |
 | INV-40 | DDL via `exec` (`CREATE TABLE/INDEX/TRIGGER`, `ALTER TABLE ADD/RENAME COLUMN`, `DROP TABLE`) is captured and visible in `clone` at that commit; `sqlite_master` of clone(k) == model. | schema-evolution scenario | E | partial |
 | INV-41 | Large payloads: a 300 KB blob spans ~75 overflow pages, all captured; blob hash equal in clone. | large-payload scenario | E | gap (manual ok) |
@@ -92,7 +92,7 @@ Legend. Status: `ok` covered today, `gap` not tested, `FAIL` confirmed failing (
 | INV-45 | `--root/--db` flags, `WALFLIP_ROOT/WALFLIP_DB`, and mixed (flag overrides env) select the same database. | env scenario | E | partial |
 | INV-46 | `list` is sorted by name, counts equal each db's `status.commits`, ignores folders without `live.db`, and does not create files in them. | many-dbs scenario; check no `meta.db` appears in a decoy folder | E | gap |
 | INV-47 | `summarize`/clone report works for any table name SQLite accepts (quotes, spaces, unicode, keywords). | DDL scenario with `CREATE TABLE "a""b"`, `"with space"`, `"select"` | E | FAIL (B1) |
-| INV-48 | Concurrent readers on `live.db` (a held read transaction) during `exec`: exec succeeds, capture complete, no duplicates on the next `exec` even though the WAL was not checkpointed. | spawn `python3 -I`/rusqlite reader holding `BEGIN; SELECT` | E | gap |
+| INV-48 | Concurrent readers on `live.db` (a held read transaction) during `exec`: exec succeeds, capture complete, no duplicates on the next `exec` even though the WAL was not checkpointed. | spawn `python3 -I`/rusqlite reader holding `BEGIN; SELECT` | E | ok: S14 |
 | INV-49 | Concurrent `clone -n k` of the same db (same and different k) all succeed and are byte-identical per k. | spawn 8 processes | E | gap |
 | INV-50 | `exec -` splits on lines: a multi-line statement fails with `incomplete input`, nothing committed, earlier lines kept. Documented behaviour. | e2e | E | ok: S10 |
 | INV-51 | `exec` with 2000 single-row inserts in one batch finishes in bounded time (WAL is re-read per statement: O(N * WAL)). Budget: < 10 s debug. | timed scenario, `#[ignore]` by default | E | gap |
@@ -115,15 +115,13 @@ Legend. Status: `ok` covered today, `gap` not tested, `FAIL` confirmed failing (
 
 ### 1.6 Priority order for fixing (likely real bugs)
 
-2. INV-24 (B4) concurrent exec: open the `meta.db` transaction with `BEGIN IMMEDIATE` *before* reading the cursor and the WAL, or hold a lock file in the db folder for the whole `exec`.
-4. INV-25 (B3) uncaptured-commit labelling: capture before the first statement with label `(recovered)`.
+2. INV-24 (B4) concurrent exec: done in T16 (`BEGIN IMMEDIATE` on `meta.db` per statement, then `BEGIN IMMEDIATE` on `live.db`, capture inside the `meta.db` transaction).
+4. INV-25 (B3) uncaptured-commit labelling: done in T16 (`(recovered)` pre-capture under both locks).
 5. INV-15 (B6) replay allocation bound.
 
 Known-red scenarios currently merged as `#[ignore]` (T23 removes this list):
 
 - `tests/perf.rs::s20_stdin_batch_of_2000_inserts`: `#[ignore]`, 53.9 s debug vs 10 s INV-51 budget (no B-number; WAL re-read per statement).
-- `tests/scenarios_concurrency.rs::s13_concurrent_exec`: KNOWN FAILING: B4, fixed by T16.
-- `tests/scenarios_concurrency.rs::s15_writer_dies_mid_life`: KNOWN FAILING: B3, fixed by T16.
 - B9 (found by T12): `clone_at` checked `out.exists()` then wrote, so concurrent clones to one
   path could both succeed. Fixed in T13: `create_new(true)`; S12 asserts exactly one racer wins.
 
@@ -226,9 +224,9 @@ Each scenario asserts the full `assert_invariants` set after every step unless s
 | S10 | interrupted / failed batch | stdin batch with a bad line in the middle; a statement with `; COMMIT;` inside; a `BEGIN` without `COMMIT`; a multi-line statement | shadow fed only successful statements; after each failure `clone(total) == live` | INV-37, INV-39, INV-50 |
 | S11 | clone chain | 30 commits; for all n<m sampled pairs, `apply(frames n+1..=m)` on clone(n) == clone(m); clone(total) == live | byte compare | INV-32, INV-31 |
 | S12 | concurrent clones | 8 processes clone the same db, half `-n 10` half `-n 20`, to distinct paths; 2 processes race for the same path | all `-n 10` identical; exactly one of the racers succeeds or both fail, file (if any) is a valid clone | INV-49, INV-35 |
-| S13 | concurrent exec (open question) | 4 processes x 20 inserts on one db | expected: 80 commits, labels == statements; today 120 and `UNIQUE` errors | INV-24 (B4 fails) |
+| S13 | concurrent exec (open question) | 4 processes x 20 inserts on one db | 80 commits, labels == statements (B4 fixed in T16) | INV-24 |
 | S14 | concurrent reader | hold `BEGIN; SELECT` on live.db from a helper process while running 10 `exec`; release; 10 more | no dup commits; `status.wal_bytes` present during, cleared after a final exec | INV-48, INV-23 |
-| S15 | writer dies mid-life | helper process inserts with `wal_autocheckpoint=0` and `os._exit(0)`; then `status`, `clone`, `exec` | `status` shows WAL bytes; expected (after fix): `exec` captures the orphan under `(recovered)` | INV-25 (B3 fails) |
+| S15 | writer dies mid-life | helper process inserts with `wal_autocheckpoint=0` and `os._exit(0)`; then `status`, `clone`, `exec` | `status` shows WAL bytes; `status` shows `uncaptured: 3`; `exec` warns and captures the orphans under `(recovered)` before its statement (B3 fixed in T16) | INV-25 |
 | S16 | rename/drop mid-life | two dbs; rename A while B keeps writing; drop B; A's history byte-identical to before rename | `meta.db` hash of A unchanged; B folder gone; `list` | INV-43 |
 | S17 | read-only output dir | `chmod 555` target dir; `clone` fails; no file; db hashes unchanged (skipped as root) | hashes | INV-36 |
 | S18 | schema file matrix | multi-statement + seed rows; stdin vs file (byte-identical `base.db`); empty file; syntax error; constraint violation in seed; `BEGIN/COMMIT`; unterminated `BEGIN`; `PRAGMA journal_mode=DELETE`; `PRAGMA page_size=8192`; `ATTACH` (asserts chosen policy) | `base.db == live.db` after create; folder absent after failures; `exec` after each successful create captures 1 commit | INV-52..INV-61 (B5 fails; B7/B8 per decision) |

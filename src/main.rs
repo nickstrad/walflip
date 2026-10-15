@@ -97,7 +97,16 @@ fn main() -> Result<()> {
             } else {
                 vec![sql]
             };
-            println!("captured {} commit(s)", db::exec(&open()?, &stmts)?);
+            let r = db::exec_with(&open()?, &stmts, walflip::store::DEFAULT_BUSY_TIMEOUT)?;
+            if r.recovered > 0 {
+                eprintln!(
+                    "warning: {} commit(s) in live.db-wal were not in history (a writer crashed before \
+                     capturing, or something else wrote live.db); captured them as {}",
+                    r.recovered,
+                    db::RECOVERED_LABEL
+                );
+            }
+            println!("captured {} commit(s)", r.captured);
         }
         Cmd::Log { limit } => {
             println!("{:>5} {:>6} {:>8}  sql", "n", "frames", "db_pages");
@@ -114,6 +123,9 @@ fn main() -> Result<()> {
             match s.wal_bytes {
                 Some(b) => println!("live wal  : {b} bytes"),
                 None => println!("live wal  : absent (checkpointed)"),
+            }
+            if s.uncaptured > 0 {
+                println!("uncaptured: {} (next exec stores them as {})", s.uncaptured, db::RECOVERED_LABEL);
             }
         }
         Cmd::Clone { n, out } => {

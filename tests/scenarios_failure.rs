@@ -191,12 +191,12 @@ fn s10_multi_line_statement_fails_with_incomplete_input() {
     );
 }
 
-/// INV-38 backstop: a commit already in the WAL when `exec` starts (a writer that has not
-/// checkpointed, B3) makes the next statement yield 2 commits. `exec` captures both, so history
-/// still matches live.db, and reports the extra commit as an error. (T16 is expected to capture
-/// such commits up front instead.)
+/// INV-25 (B3, T16): a commit already in the WAL when `exec` starts (a writer that has not
+/// checkpointed) is captured first under `(recovered)`, then the statement gets its own commit;
+/// `exec` succeeds and counts both. Before T16 this was the >1-commit backstop case (an error);
+/// that backstop is now covered by `db::tests::backstop_more_than_one_commit_is_captured_then_reported`.
 #[test]
-fn backstop_more_than_one_commit_is_captured_then_reported() {
+fn orphan_commit_is_recovered_before_the_statement() {
     let tmp = tempfile::tempdir().unwrap();
     let d = Db::new(tmp.path(), "bs").unwrap();
     db::create(&d, Some(SCHEMA)).unwrap();
@@ -207,13 +207,32 @@ fn backstop_more_than_one_commit_is_captured_then_reported() {
     ext.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
     ext.execute_batch(&ins("external")).unwrap();
 
-    let err = format!("{:#}", db::exec(&d, &[ins("b")]).expect_err("2 commits from 1 statement"));
-    assert!(err.contains("2 commits"), "{err}");
+    let r = db::exec_with(&d, &[ins("b")], walflip::store::DEFAULT_BUSY_TIMEOUT).unwrap();
+    assert_eq!(r, db::ExecReport { captured: 2, recovered: 1 });
     drop(ext);
+
+    let labels: Vec<String> = db::log(&d, 10).unwrap().into_iter().map(|e| e.sql).collect();
+    assert_eq!(labels, [ins("a"), db::RECOVERED_LABEL.to_string(), ins("b")]);
 
     let mut m = Model::new(Some(SCHEMA));
     m.exec(&ins("a"), 1);
     m.exec(&ins("external"), 1);
     m.exec(&ins("b"), 1);
     assert_invariants(tmp.path(), "bs", Some(&m), Checks::full());
+}
+
+/// T14 finding: a batch that fails on a later line reports how many commits it had captured.
+#[test]
+fn failed_batch_reports_commits_captured_before_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = Db::new(tmp.path(), "fb").unwrap();
+    db::create(&d, Some(SCHEMA)).unwrap();
+    let err = db::exec(&d, &[ins("1"), ins("2"), "INSERT INTO nope VALUES(1)".into(), ins("4")])
+        .expect_err("line 3 fails");
+    let f = err.downcast_ref::<db::ExecFailed>().expect("error carries ExecFailed");
+    assert_eq!(*f, db::ExecFailed { captured: 2, recovered: 0, statement: 3 });
+    assert!(format!("{err:#}").contains("no such table: nope"), "{err:#}");
+    // Nothing captured yet: no ExecFailed context, the error is the statement's own.
+    let err = db::exec(&d, &["INSERT INTO nope VALUES(1)".into()]).unwrap_err();
+    assert!(err.downcast_ref::<db::ExecFailed>().is_none());
 }

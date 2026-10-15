@@ -2,8 +2,8 @@
 
 use crate::wal;
 use anyhow::{bail, Result};
-use rusqlite::{params, Connection, OptionalExtension};
-use std::{fs, io, path::Path};
+use rusqlite::{params, Connection, ErrorCode, OptionalExtension};
+use std::{fs, io, path::Path, time::Duration};
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -42,13 +42,53 @@ pub fn commits_seen(
     }
 }
 
+/// How long a connection waits for a lock held by another process before giving up.
+pub const DEFAULT_BUSY_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// What a capture saw of the WAL file: its length and first 32 bytes (the header, whose salt
+/// changes on every WAL restart). `None` when there is no WAL. Two equal marks mean no commit was
+/// added in between, so a caller holding the write lock can skip re-reading an unchanged WAL.
+pub type WalMark = Option<(u64, Vec<u8>)>;
+
+/// The current [`WalMark`] of the file at `wal`.
+pub fn wal_mark(wal: &Path) -> WalMark {
+    use std::io::Read;
+    let f = fs::File::open(wal).ok()?;
+    let len = f.metadata().ok()?.len();
+    let mut head = Vec::with_capacity(32);
+    f.take(32).read_to_end(&mut head).ok()?;
+    Some((len, head))
+}
+
+fn mark_of(bytes: &[u8]) -> WalMark {
+    Some((bytes.len() as u64, bytes[..bytes.len().min(32)].to_vec()))
+}
+
+/// True when `e` is SQLite reporting that another connection holds the lock it needed.
+pub fn is_busy(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| {
+        matches!(
+            c.downcast_ref::<rusqlite::Error>(),
+            Some(rusqlite::Error::SqliteFailure(f, _))
+                if matches!(f.code, ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked)
+        )
+    })
+}
+
 pub struct Store {
     conn: Connection,
 }
 
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
+        Self::open_with_timeout(path, DEFAULT_BUSY_TIMEOUT)
+    }
+
+    /// Open with a custom busy timeout: how long any statement waits for another process's lock.
+    pub fn open_with_timeout(path: &Path, busy: Duration) -> Result<Self> {
         let conn = Connection::open(path)?;
+        // Before the schema: even `CREATE TABLE IF NOT EXISTS` needs a shared lock.
+        conn.busy_timeout(busy)?;
         conn.execute_batch(SCHEMA)?;
         Ok(Self { conn })
     }
@@ -58,10 +98,7 @@ impl Store {
     }
 
     pub fn get(&self, key: &str) -> Result<Option<String>> {
-        Ok(self
-            .conn
-            .query_row("SELECT value FROM meta WHERE key=?1", [key], |r| r.get(0))
-            .optional()?)
+        get_meta(&self.conn, key)
     }
 
     pub fn set(&self, key: &str, value: &str) -> Result<()> {
@@ -76,50 +113,146 @@ impl Store {
         Ok(self.conn.query_row("SELECT count(*) FROM commits", [], |r| r.get(0))?)
     }
 
-    /// Copy any commits in the live WAL we have not stored yet. Idempotent: re-reading the
-    /// same WAL adds nothing. Returns the number of commits added.
-    pub fn capture(&mut self, wal_path: &Path, label: &str) -> Result<usize> {
-        let bytes = match fs::read(wal_path) {
-            Ok(b) => b,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(0),
-            Err(e) => return Err(e.into()),
-        };
-        let Some(wal) = wal::parse(&bytes)? else { return Ok(0) };
-
-        // Clone writes pages at (pgno-1)*page_size using the size saved at create; a different
-        // size in the WAL would make replayed frames land at the wrong offsets.
-        if let Some(stored) = self.page_size()? {
-            if stored != u64::from(wal.page_size) {
-                bail!("WAL page size {} does not match base snapshot page size {stored}", wal.page_size);
-            }
-        }
-
+    /// Commits in the WAL at `wal_path` that are not stored yet (0 when there is no WAL or it does
+    /// not parse). Read-only and unlocked, so only a hint while writers are running.
+    pub fn uncaptured(&self, wal_path: &Path) -> Result<u64> {
+        let Ok(bytes) = fs::read(wal_path) else { return Ok(0) };
+        let Ok(Some(wal)) = wal::parse(&bytes) else { return Ok(0) };
         let seen = commits_seen(
             self.get("cursor_salt")?.as_deref(),
             self.get("cursor_commits")?.as_deref(),
             wal.salt,
         );
-        let total = wal.commits.len();
-        let first_idx = self.commit_count()? + 1;
-
-        let tx = self.conn.transaction()?;
-        for (idx, commit) in (first_idx..).zip(wal.commits.iter().skip(seen)) {
-            tx.execute(
-                "INSERT INTO commits(idx,label,db_pages) VALUES(?1,?2,?3)",
-                params![idx, label, commit.db_pages],
-            )?;
-            for (seq, f) in commit.frames.iter().enumerate() {
-                tx.execute(
-                    "INSERT INTO frames(commit_idx,seq,pgno,page) VALUES(?1,?2,?3,?4)",
-                    params![idx, seq, f.pgno, f.page],
-                )?;
-            }
-        }
-        set_meta(&tx, "cursor_salt", &format!("{}:{}", wal.salt.0, wal.salt.1))?;
-        set_meta(&tx, "cursor_commits", &total.to_string())?;
-        tx.commit()?;
-        Ok(total.saturating_sub(seen))
+        Ok(wal.commits.len().saturating_sub(seen) as u64)
     }
+
+    /// Take the history write lock: `BEGIN IMMEDIATE` on `meta.db`. Only one connection holds it
+    /// at a time; others wait up to the busy timeout, then fail with SQLITE_BUSY (see [`is_busy`]).
+    /// It is an ordinary SQLite file lock, so it vanishes when the holding process dies, and an
+    /// unfinished transaction is rolled back from its journal by the next opener.
+    pub fn lock(&mut self) -> Result<WriteLock<'_>> {
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        Ok(WriteLock { conn: &self.conn, done: false })
+    }
+
+    /// Copy any commits in the live WAL we have not stored yet. Idempotent: re-reading the
+    /// same WAL adds nothing. Returns the number of commits added. Takes the write lock for the
+    /// duration unless this connection is already inside a transaction.
+    pub fn capture(&mut self, wal_path: &Path, label: &str) -> Result<usize> {
+        if !self.conn.is_autocommit() {
+            return Ok(capture_in_savepoint(&self.conn, wal_path, label)?.added);
+        }
+        let lock = self.lock()?;
+        let c = lock.capture(wal_path, label)?;
+        lock.commit()?;
+        Ok(c.added)
+    }
+}
+
+/// The result of one capture.
+#[derive(Debug)]
+pub struct Captured {
+    /// Commits added to history.
+    pub added: usize,
+    /// The WAL as this capture read it.
+    pub mark: WalMark,
+}
+
+/// The history write lock (an open `BEGIN IMMEDIATE` on `meta.db`). Dropping it without
+/// [`WriteLock::commit`] rolls back everything captured under it.
+pub struct WriteLock<'a> {
+    conn: &'a Connection,
+    done: bool,
+}
+
+impl WriteLock<'_> {
+    /// Like [`Store::capture`], but inside this lock. The WAL and the cursor are read only now,
+    /// with the lock held, so no other walflip process can add or capture commits in between. A
+    /// failed capture is rolled back to a savepoint: history and the cursor stay exactly as before
+    /// (INV-26) and the lock stays held.
+    pub fn capture(&self, wal_path: &Path, label: &str) -> Result<Captured> {
+        capture_in_savepoint(self.conn, wal_path, label)
+    }
+
+    /// Make everything captured under the lock durable and release it.
+    pub fn commit(mut self) -> Result<()> {
+        self.done = true;
+        self.conn.execute_batch("COMMIT")?;
+        Ok(())
+    }
+}
+
+impl Drop for WriteLock<'_> {
+    fn drop(&mut self) {
+        if !self.done && !self.conn.is_autocommit() {
+            let _ = self.conn.execute_batch("ROLLBACK");
+        }
+    }
+}
+
+fn get_meta(conn: &Connection, key: &str) -> Result<Option<String>> {
+    Ok(conn.query_row("SELECT value FROM meta WHERE key=?1", [key], |r| r.get(0)).optional()?)
+}
+
+fn capture_in_savepoint(conn: &Connection, wal_path: &Path, label: &str) -> Result<Captured> {
+    conn.execute_batch("SAVEPOINT walflip_capture")?;
+    match capture_rows(conn, wal_path, label) {
+        Ok(c) => {
+            conn.execute_batch("RELEASE walflip_capture")?;
+            Ok(c)
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK TO walflip_capture; RELEASE walflip_capture");
+            Err(e)
+        }
+    }
+}
+
+/// The body of a capture; the caller provides the transaction.
+fn capture_rows(conn: &Connection, wal_path: &Path, label: &str) -> Result<Captured> {
+    let bytes = match fs::read(wal_path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Captured { added: 0, mark: None }),
+        Err(e) => return Err(e.into()),
+    };
+    let mark = mark_of(&bytes);
+    let Some(wal) = wal::parse(&bytes)? else { return Ok(Captured { added: 0, mark }) };
+
+    // Clone writes pages at (pgno-1)*page_size using the size saved at create; a different
+    // size in the WAL would make replayed frames land at the wrong offsets.
+    let stored_ps: Option<u64> = get_meta(conn, "page_size")?.map(|v| v.parse()).transpose()?;
+    if let Some(stored) = stored_ps {
+        if stored != u64::from(wal.page_size) {
+            bail!("WAL page size {} does not match base snapshot page size {stored}", wal.page_size);
+        }
+    }
+
+    let salt = format!("{}:{}", wal.salt.0, wal.salt.1);
+    let stored_salt = get_meta(conn, "cursor_salt")?;
+    let stored_commits = get_meta(conn, "cursor_commits")?;
+    let seen = commits_seen(stored_salt.as_deref(), stored_commits.as_deref(), wal.salt);
+    let total = wal.commits.len();
+    let added = total.saturating_sub(seen);
+    // Nothing new and the cursor already says so: write nothing, so meta.db stays byte-identical.
+    if added == 0 && stored_salt.as_deref() == Some(salt.as_str()) && stored_commits == Some(total.to_string()) {
+        return Ok(Captured { added, mark });
+    }
+    let first_idx = conn.query_row("SELECT count(*) FROM commits", [], |r| r.get::<_, u64>(0))? + 1;
+    for (idx, commit) in (first_idx..).zip(wal.commits.iter().skip(seen)) {
+        conn.execute(
+            "INSERT INTO commits(idx,label,db_pages) VALUES(?1,?2,?3)",
+            params![idx, label, commit.db_pages],
+        )?;
+        for (seq, f) in commit.frames.iter().enumerate() {
+            conn.execute(
+                "INSERT INTO frames(commit_idx,seq,pgno,page) VALUES(?1,?2,?3,?4)",
+                params![idx, seq, f.pgno, f.page],
+            )?;
+        }
+    }
+    set_meta(conn, "cursor_salt", &salt)?;
+    set_meta(conn, "cursor_commits", &total.to_string())?;
+    Ok(Captured { added, mark })
 }
 
 #[cfg(test)]
@@ -292,6 +425,70 @@ mod tests {
         s.conn().execute_batch("DROP TRIGGER boom; DROP TRIGGER boom2;").unwrap();
         assert_eq!(s.capture(&wal, "b").unwrap(), 2);
         assert_eq!(rows(&s), expected(&c));
+    }
+
+    /// INV-26 under the write lock: a failed capture rolls back to its savepoint, so commits,
+    /// frames and cursor are as before, the lock is still held, and a later capture in the same
+    /// lock (and its commit) works.
+    #[test]
+    fn inv26_failed_capture_inside_lock_rolls_back_only_itself() {
+        let (d, mut s, wal) = setup();
+        let c = sample(3);
+        write_wal(&wal, (1, 2), PS as u32, &c[..1]);
+        assert_eq!(s.capture(&wal, "a").unwrap(), 1);
+        let before = rows(&s);
+        let bad = d.path().join("bad-wal");
+        write_wal(&bad, (1, 2), 1024, &sample(1));
+        s.set("page_size", &PS.to_string()).unwrap();
+        {
+            let lock = s.lock().unwrap();
+            assert!(lock.capture(&bad, "bad").is_err());
+            write_wal(&wal, (1, 2), PS as u32, &c);
+            assert_eq!(lock.capture(&wal, "b").unwrap().added, 2);
+            lock.commit().unwrap();
+        }
+        assert_eq!(rows(&s), expected(&c));
+        assert!(s.conn().is_autocommit());
+        // Dropping a lock without commit rolls back what it captured.
+        write_wal(&wal, (1, 2), PS as u32, &[c.clone(), sample(1)].concat());
+        {
+            let lock = s.lock().unwrap();
+            assert_eq!(lock.capture(&wal, "dropped").unwrap().added, 1);
+        }
+        assert_eq!(rows(&s), expected(&c));
+        assert_ne!(before, rows(&s));
+    }
+
+    /// INV-26 with a lock held elsewhere: capture waits, then fails with SQLITE_BUSY
+    /// (`is_busy`) and the store is unchanged.
+    #[test]
+    fn inv26_capture_fails_busy_without_side_effects() {
+        let (d, _s, wal) = setup();
+        let mut s = Store::open_with_timeout(&d.path().join("meta.db"), Duration::from_millis(50)).unwrap();
+        write_wal(&wal, (1, 2), PS as u32, &sample(2));
+        let other = Connection::open(d.path().join("meta.db")).unwrap();
+        other.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let err = s.capture(&wal, "x").unwrap_err();
+        assert!(is_busy(&err), "{err:#}");
+        other.execute_batch("ROLLBACK").unwrap();
+        assert_eq!(rows(&s), (vec![], vec![]));
+        assert_eq!(s.get("cursor_commits").unwrap(), None);
+        assert_eq!(s.capture(&wal, "x").unwrap(), 2);
+    }
+
+    /// An idempotent capture writes nothing, so a no-op leaves meta.db byte-identical (INV-37).
+    #[test]
+    fn capture_with_nothing_new_does_not_touch_the_file() {
+        let (d, mut s, wal) = setup();
+        write_wal(&wal, (1, 2), PS as u32, &sample(2));
+        s.capture(&wal, "x").unwrap();
+        let meta = d.path().join("meta.db");
+        let before = fs::read(&meta).unwrap();
+        assert_eq!(s.capture(&wal, "x").unwrap(), 0);
+        assert_eq!(fs::read(&meta).unwrap(), before);
+        assert_eq!(s.uncaptured(&wal).unwrap(), 0);
+        write_wal(&wal, (1, 2), PS as u32, &sample(3));
+        assert_eq!(s.uncaptured(&wal).unwrap(), 1);
     }
 
     #[test]

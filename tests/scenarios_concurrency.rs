@@ -1,8 +1,7 @@
 //! Concurrency scenarios S12-S15 (docs/TESTING_PLAN.md section 3.2).
 //!
-//! Every barrier is a pipe (see `common::helpers`); there are no sleeps. S13 and S15 document
-//! open defects B4 and B3 and are ignored until T16 lands:
-//! `cargo test --features testing --test scenarios_concurrency -- --ignored`.
+//! Every barrier is a pipe (see `common::helpers`); there are no sleeps. S13 and S15 were red
+//! for B4 and B3 until T16 (history write lock per statement, `(recovered)` pre-capture).
 #![cfg(unix)]
 
 mod common;
@@ -112,7 +111,6 @@ fn s12_concurrent_clones() {
 /// S13 (INV-24): 4 concurrent `exec -` batches of 20 inserts on one db must produce exactly
 /// 80 commits, one per statement, with matching labels and no errors.
 #[test]
-#[ignore = "KNOWN FAILING: B4, fixed by T16"]
 fn s13_concurrent_exec() {
     const PROCS: usize = 4;
     const PER: usize = 20;
@@ -227,11 +225,34 @@ fn s14_concurrent_reader() {
     assert_eq!(o.commits, 20);
 }
 
+/// Q1: a process that dies while holding the history write lock (an open `BEGIN IMMEDIATE` with
+/// an uncommitted change on meta.db) leaves no stale lock: the next `exec` gets the lock at once
+/// (well within the busy timeout), the dead transaction is rolled back, history stays exact.
+#[test]
+fn s15b_lock_holder_dies() {
+    let h = Harness::new();
+    let mut model = seeded(&h, "l", 2);
+    let root = h.root();
+    let d = Db::existing(&root, "l").unwrap();
+
+    let f = helpers::crash_writer(&d.meta, &["BEGIN IMMEDIATE", "INSERT INTO meta(key, value) VALUES('junk', 'x')"]);
+    assert!(f.status.success() && f.stdout.contains("WROTE 2"), "lock holder: {f:?}");
+
+    let t = std::time::Instant::now();
+    let sql = insert("after");
+    let n = h.exec("l", &sql);
+    assert!(t.elapsed() < std::time::Duration::from_secs(5), "exec waited {:?} for a dead lock", t.elapsed());
+    model.exec(&sql, n);
+    assert_invariants(&root, "l", Some(&model), Checks::full());
+    let junk: i64 =
+        open_ro(&d.meta).query_row("SELECT count(*) FROM meta WHERE key='junk'", [], |r| r.get(0)).unwrap();
+    assert_eq!(junk, 0, "the dead process's uncommitted write survived");
+}
+
 /// S15 (INV-25): a writer dies without closing SQLite, leaving 3 uncaptured commits in
 /// live.db-wal. `status` and `clone` still work; the next `exec` must not attribute the orphan
 /// commits to its own statement (expected: they are captured under a `(recovered)` label).
 #[test]
-#[ignore = "KNOWN FAILING: B3, fixed by T16"]
 fn s15_writer_dies_mid_life() {
     let h = Harness::new();
     h.create("w", SCHEMA);
@@ -248,8 +269,17 @@ fn s15_writer_dies_mid_life() {
     assert_eq!(o.commits, 0);
     assert!(o.wal_bytes.unwrap_or(0) > 0, "S15: crashed writer left no WAL: {:?}", o.wal_bytes);
 
+    // Plan Q3: `status` reports the orphans, `exec` warns on stderr and counts them.
+    let st = h.ok(&["--db", "w", "status"]);
+    assert!(st.contains("uncaptured: 3"), "S15: status should report 3 uncaptured commits: {st}");
+
     let stmt = insert("after");
-    let n = h.exec("w", &stmt);
+    let out = h.with_stdin(&["--db", "w", "exec", &stmt], "");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "S15: exec failed: {stderr}");
+    assert!(stderr.contains("warning") && stderr.contains("(recovered)"), "S15: no recovery warning: {stderr}");
+    let n = parse_captured(&String::from_utf8(out.stdout).unwrap());
+    assert_eq!(n, 4, "S15: exec reports the 3 recovered commits plus its own");
 
     // The rows themselves must all be in history (INV-39/INV-31 via the strong oracle).
     let o = assert_invariants(&root, "w", None, Checks::full());
@@ -261,4 +291,8 @@ fn s15_writer_dies_mid_life() {
          got {} commits, {labelled} labelled with the statement, {recovered} (recovered); exec printed captured {n}",
         o.commits
     );
+    // Order: the orphans come first, the statement last.
+    assert_eq!(o.log.last().map(|r| r.sql.as_str()), Some(stmt.as_str()), "INV-25: statement is not the last commit");
+    let st = h.ok(&["--db", "w", "status"]);
+    assert!(!st.contains("uncaptured"), "S15: nothing should be left uncaptured: {st}");
 }

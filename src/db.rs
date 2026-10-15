@@ -1,11 +1,13 @@
 //! Database-level operations. Everything here returns plain data; printing belongs to the CLI.
 
-use crate::{replay, store::Store};
+use crate::replay;
+use crate::store::{wal_mark, Store, WalMark};
 use anyhow::{bail, Context, Result};
 use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use std::fs::{self, OpenOptions};
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
@@ -203,70 +205,184 @@ pub fn drop_db(db: &Db) -> Result<()> {
     Ok(())
 }
 
+/// Label of commits found in the WAL that no walflip `exec` recorded (a writer that crashed before
+/// capture, or a process writing `live.db` directly). Plan Q3 / INV-25.
+pub const RECOVERED_LABEL: &str = "(recovered)";
+
+/// What one `exec` call captured.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ExecReport {
+    /// All commits added to history, including `recovered`.
+    pub captured: usize,
+    /// Commits that were already in the WAL before a statement ran, stored as [`RECOVERED_LABEL`].
+    pub recovered: usize,
+}
+
+/// Attached to the error of an `exec` that failed after it had already captured commits, so the
+/// count is not lost (`err.downcast_ref::<ExecFailed>()`). Earlier statements stay committed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExecFailed {
+    /// Commits captured by this `exec` before (and including) the failing statement.
+    pub captured: usize,
+    pub recovered: usize,
+    /// 1-based position of the failing statement.
+    pub statement: usize,
+}
+
+impl std::fmt::Display for ExecFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "statement {} failed; {} commit(s) were captured before it stopped", self.statement, self.captured)?;
+        if self.recovered > 0 {
+            write!(f, " ({} of them {RECOVERED_LABEL})", self.recovered)?;
+        }
+        Ok(())
+    }
+}
+
 /// Run each statement as its own transaction and capture the commits it produced.
 /// Returns the total number of commits captured. A statement that changes nothing
 /// (e.g. an UPDATE that matches no rows) writes no WAL frames and so adds no commit.
+/// See [`exec_with`] for locking, recovery and error behaviour.
+pub fn exec(db: &Db, statements: &[String]) -> Result<usize> {
+    Ok(exec_with(db, statements, crate::store::DEFAULT_BUSY_TIMEOUT)?.captured)
+}
+
+/// [`exec`] with a busy timeout and a report that separates recovered commits.
+///
+/// Concurrency (plan Q1, INV-24): for each statement, `exec` first takes the history write lock
+/// (`BEGIN IMMEDIATE` on `meta.db`), then the `live.db` write lock (`BEGIN IMMEDIATE`), runs the
+/// statement, commits it, captures it inside the still-open `meta.db` transaction, and only then
+/// releases the history lock. So the WAL and the cursor are read only while no other walflip
+/// process can write or capture, and each statement's commit is captured before anyone else can
+/// add one. Every walflip process takes the two locks in the same order, so they cannot deadlock.
+/// Both locks are SQLite file locks: they vanish with the process. A lock not obtained within
+/// `busy` is a clean `locked` error with nothing changed.
+///
+/// Recovery (plan Q3, INV-25): with both locks held and before the statement runs, any commit
+/// already in the WAL that history does not have yet was written by someone else (a crashed
+/// writer, an external tool). It is captured first under [`RECOVERED_LABEL`], never attributed to
+/// the statement.
 ///
 /// Statements may not control the transaction (`BEGIN`/`COMMIT`/`ROLLBACK`, plan Q2): the
 /// authorizer rejects them, so a statement like `INSERT ...; COMMIT; INSERT ...` fails and
 /// nothing it did is committed. As a backstop (INV-39), a failed statement whose run changed the
 /// WAL is still captured, so `live.db` and history cannot diverge; and a statement that yields
-/// more than one commit is an error (INV-38) after its commits are captured.
-pub fn exec(db: &Db, statements: &[String]) -> Result<usize> {
-    let mut store = Store::open(&db.meta)?;
+/// more than one commit is an error (INV-38) after its commits are captured. An error after some
+/// commits were captured carries [`ExecFailed`] with the count.
+pub fn exec_with(db: &Db, statements: &[String], busy: Duration) -> Result<ExecReport> {
+    exec_inner(db, statements, busy, None)
+}
+
+/// Test hook run between a statement's commit and its capture (simulates a foreign writer
+/// slipping in there, the one window the locks cannot close). Always `None` outside tests.
+type AfterCommit = Option<Box<dyn Fn()>>;
+
+fn exec_inner(db: &Db, statements: &[String], busy: Duration, after_commit: AfterCommit) -> Result<ExecReport> {
+    let mut store = Store::open_with_timeout(&db.meta, busy)?;
     let conn = Connection::open(&db.live)?;
+    conn.busy_timeout(busy)?;
     assert_wal(&conn)?;
     let deny_tx = Arc::new(AtomicBool::new(false));
     let denied = install_authorizer(&conn, Some(deny_tx.clone()));
     // Stop SQLite from folding the WAL back into the db while we are still reading it.
     conn.pragma_update(None, "wal_autocheckpoint", 0)?;
 
-    let wal = db.wal_path();
-    let mut total = 0;
-    for stmt in statements {
-        let before = wal_fingerprint(&wal);
-        let ran = run_statement(&conn, &deny_tx, &denied, stmt);
-        if let Err(e) = ran {
-            // Backstop: anything that reached live.db despite the error must reach history too.
-            // Skip capture when the WAL is untouched so a clean failure leaves meta.db as is.
-            if wal_fingerprint(&wal) == before {
+    let mut s = ExecState {
+        conn: &conn,
+        deny_tx: &deny_tx,
+        denied: &denied,
+        wal: db.wal_path(),
+        last_mark: None,
+        report: ExecReport::default(),
+        after_commit,
+    };
+    for (i, stmt) in statements.iter().enumerate() {
+        if let Err(e) = s.statement(&mut store, stmt) {
+            let r = s.report;
+            if r.captured == 0 {
                 return Err(e);
             }
-            let n = store.capture(&wal, stmt).with_context(|| format!("{e:#}"))?;
+            return Err(e.context(ExecFailed { captured: r.captured, recovered: r.recovered, statement: i + 1 }));
+        }
+    }
+    Ok(s.report)
+}
+
+struct ExecState<'a> {
+    conn: &'a Connection,
+    deny_tx: &'a AtomicBool,
+    denied: &'a Denied,
+    wal: PathBuf,
+    /// The WAL as our last capture read it (outer `None` = no capture yet). While it is unchanged
+    /// nobody has committed since, so the recovery capture can skip re-reading the WAL.
+    last_mark: Option<WalMark>,
+    report: ExecReport,
+    after_commit: AfterCommit,
+}
+
+impl ExecState<'_> {
+    fn statement(&mut self, store: &mut Store, stmt: &str) -> Result<()> {
+        let lock = store.lock().map_err(|e| locked(e, "history (meta.db): another walflip exec is running"))?;
+        let tx = Transaction::new_unchecked(self.conn, TransactionBehavior::Immediate)
+            .map_err(|e| locked(e.into(), "live.db: another process is writing it"))?;
+
+        // B3: both locks are held, so whatever is in the WAL and not in history was committed by
+        // someone outside walflip. Capture it before the statement can be blamed for it.
+        let before = wal_mark(&self.wal);
+        if self.last_mark.as_ref() != Some(&before) {
+            let n = lock.capture(&self.wal, RECOVERED_LABEL).context("capturing commits found in the WAL")?.added;
+            self.report.recovered += n;
+            self.report.captured += n;
+        }
+
+        if let Err(e) = run_statement(tx, self.deny_tx, self.denied, stmt) {
+            // Backstop: anything that reached live.db despite the error must reach history too.
+            // Skip capture when the WAL is untouched so a clean failure leaves meta.db as is.
+            let n = if wal_mark(&self.wal) == before {
+                0
+            } else {
+                let c = lock.capture(&self.wal, stmt).with_context(|| format!("{e:#}"))?;
+                self.last_mark = Some(c.mark);
+                c.added
+            };
+            lock.commit()?;
+            self.report.captured += n;
             if n == 0 {
                 return Err(e);
             }
             return Err(e.context(format!("{n} commit(s) from this statement reached live.db and were captured")));
         }
-        let n = store.capture(&wal, stmt)?;
-        total += n;
-        if n > 1 {
-            bail!("statement produced {n} commits (at most 1 expected); all were captured: {stmt}");
+        if let Some(hook) = &self.after_commit {
+            hook();
         }
+        let c = lock.capture(&self.wal, stmt)?;
+        lock.commit()?;
+        self.last_mark = Some(c.mark);
+        self.report.captured += c.added;
+        if c.added > 1 {
+            bail!("statement produced {} commits (at most 1 expected); all were captured: {stmt}", c.added);
+        }
+        Ok(())
     }
-    Ok(total)
 }
 
-/// Run one user statement in its own transaction, with transaction control denied inside it.
-fn run_statement(conn: &Connection, deny_tx: &AtomicBool, denied: &Denied, stmt: &str) -> Result<()> {
-    let tx = conn.unchecked_transaction()?;
+/// Name the lock in a busy error; pass other errors through.
+fn locked(e: anyhow::Error, what: &str) -> anyhow::Error {
+    if crate::store::is_busy(&e) {
+        e.context(format!("locked: gave up waiting for the write lock on {what}"))
+    } else {
+        e
+    }
+}
+
+/// Run one user statement in `tx`, with transaction control denied inside it, and commit.
+fn run_statement(tx: Transaction<'_>, deny_tx: &AtomicBool, denied: &Denied, stmt: &str) -> Result<()> {
     deny_tx.store(true, Ordering::SeqCst);
     let r = tx.execute_batch(stmt);
     deny_tx.store(false, Ordering::SeqCst);
     with_denial(r, denied, format!("failed: {stmt}"))?;
     tx.commit().with_context(|| format!("failed to commit: {stmt}"))?;
     Ok(())
-}
-
-/// Length and header of the WAL file (the header salt changes when SQLite restarts the WAL), so a
-/// failed statement can tell whether it wrote anything. `None` when there is no WAL.
-fn wal_fingerprint(wal: &Path) -> Option<(u64, Vec<u8>)> {
-    use std::io::Read;
-    let f = fs::File::open(wal).ok()?;
-    let len = f.metadata().ok()?.len();
-    let mut head = Vec::with_capacity(32);
-    f.take(32).read_to_end(&mut head).ok()?;
-    Some((len, head))
 }
 
 pub struct LogEntry {
@@ -295,6 +411,9 @@ pub struct Status {
     pub frames: u64,
     /// Size of the live WAL file, if one exists.
     pub wal_bytes: Option<u64>,
+    /// Commits in the live WAL not captured yet (a crashed or external writer); the next `exec`
+    /// stores them as [`RECOVERED_LABEL`]. A hint only: read without the write lock.
+    pub uncaptured: u64,
 }
 
 pub fn status(db: &Db) -> Result<Status> {
@@ -304,6 +423,7 @@ pub fn status(db: &Db) -> Result<Status> {
         commits: store.commit_count()?,
         frames: store.conn().query_row("SELECT count(*) FROM frames", [], |r| r.get(0))?,
         wal_bytes: fs::metadata(db.wal_path()).ok().map(|m| m.len()),
+        uncaptured: store.uncaptured(&db.wal_path())?,
     })
 }
 
@@ -440,6 +560,104 @@ mod tests {
         let err = clone_at(&d, 0, &out).unwrap_err().to_string();
         assert!(err.contains("already exists"), "{err}");
         assert_eq!(fs::read(&out).unwrap(), b"keep me");
+    }
+
+    fn kv_db(tmp: &Path, name: &str) -> Db {
+        let d = Db::new(tmp, name).unwrap();
+        create(&d, Some("CREATE TABLE t(v TEXT);")).unwrap();
+        d
+    }
+
+    fn ins(v: &str) -> String {
+        format!("INSERT INTO t VALUES('{v}')")
+    }
+
+    fn labels(d: &Db) -> Vec<String> {
+        log(d, 100).unwrap().into_iter().map(|e| e.sql).collect()
+    }
+
+    /// INV-38 backstop, kept covered now that orphans are recovered up front: a foreign writer
+    /// committing between a statement's commit and its capture makes that statement yield 2
+    /// commits. Both are captured (history == live.db) and `exec` reports the error.
+    #[test]
+    fn backstop_more_than_one_commit_is_captured_then_reported() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = kv_db(tmp.path(), "bs");
+        let live = d.live.clone();
+        let ext = Connection::open(&live).unwrap();
+        ext.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
+        let hook: AfterCommit = Some(Box::new(move || ext.execute_batch(&ins("sneaky")).unwrap()));
+        let err = exec_inner(&d, &[ins("a")], Duration::from_secs(5), hook).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("2 commits"), "{msg}");
+        let f = err.downcast_ref::<ExecFailed>().expect("count kept");
+        assert_eq!((f.captured, f.recovered, f.statement), (2, 0, 1));
+        assert_eq!(labels(&d), [ins("a"), ins("a")]);
+        let out = tmp.path().join("all.db");
+        clone_at(&d, 2, &out).unwrap();
+        let rows: i64 = Connection::open(&out).unwrap().query_row("SELECT count(*) FROM t", [], |r| r.get(0)).unwrap();
+        assert_eq!(rows, 2);
+    }
+
+    /// Q1: while another process holds the history lock, `exec` waits `busy`, then fails with a
+    /// `locked` error and changes nothing; once the lock is gone it works.
+    #[test]
+    fn exec_fails_cleanly_when_history_lock_is_held() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = kv_db(tmp.path(), "lk");
+        exec(&d, &[ins("a")]).unwrap();
+        let holder = Connection::open(&d.meta).unwrap();
+        holder.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let meta_before = fs::read(&d.meta).unwrap();
+        let t = std::time::Instant::now();
+        let err = format!("{:#}", exec_with(&d, &[ins("b")], Duration::from_millis(200)).unwrap_err());
+        assert!(t.elapsed() >= Duration::from_millis(150), "did not wait for the lock");
+        assert!(err.contains("locked") && err.contains("meta.db"), "{err}");
+        holder.execute_batch("ROLLBACK").unwrap();
+        assert_eq!(fs::read(&d.meta).unwrap(), meta_before);
+        assert_eq!(labels(&d), [ins("a")]);
+        drop(holder);
+        assert_eq!(exec(&d, &[ins("b")]).unwrap(), 1);
+        assert_eq!(labels(&d), [ins("a"), ins("b")]);
+    }
+
+    /// Q1: a foreign writer holding live.db's write lock also gives a clean `locked` error, and
+    /// the history lock is released (the next exec does not wait on it).
+    #[test]
+    fn exec_fails_cleanly_when_live_db_is_write_locked() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = kv_db(tmp.path(), "lw");
+        let holder = Connection::open(&d.live).unwrap();
+        holder.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let err = format!("{:#}", exec_with(&d, &[ins("b")], Duration::from_millis(100)).unwrap_err());
+        assert!(err.contains("locked") && err.contains("live.db"), "{err}");
+        let mut s = Store::open_with_timeout(&d.meta, Duration::from_millis(1)).unwrap();
+        s.lock().unwrap().commit().unwrap();
+        holder.execute_batch("ROLLBACK").unwrap();
+        drop(holder);
+        assert_eq!(exec(&d, &[ins("b")]).unwrap(), 1);
+    }
+
+    /// B3: orphans are recovered before the first statement of a batch and between statements;
+    /// a clean failure after a recovery keeps the recovered commits.
+    #[test]
+    fn orphans_are_recovered_under_their_own_label() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = kv_db(tmp.path(), "or");
+        let ext = Connection::open(&d.live).unwrap();
+        ext.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
+        ext.execute_batch(&format!("{}; {}", ins("x1"), ins("x1b"))).unwrap(); // 2 autocommits
+        let r = exec_with(&d, &[ins("a"), ins("b")], Duration::from_secs(5)).unwrap();
+        assert_eq!(r, ExecReport { captured: 4, recovered: 2 });
+        assert_eq!(labels(&d), [RECOVERED_LABEL, RECOVERED_LABEL, &ins("a"), &ins("b")]);
+
+        ext.execute_batch(&ins("x2")).unwrap();
+        assert_eq!(status(&d).unwrap().uncaptured, 1);
+        let err = exec(&d, &["INSERT INTO nope VALUES(1)".into()]).unwrap_err();
+        let f = err.downcast_ref::<ExecFailed>().expect("recovered count kept on failure");
+        assert_eq!((f.captured, f.recovered), (1, 1));
+        assert_eq!(labels(&d).last().map(String::as_str), Some(RECOVERED_LABEL));
+        assert_eq!(status(&d).unwrap().uncaptured, 0);
     }
 
     #[test]
