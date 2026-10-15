@@ -1,0 +1,4297 @@
+{
+  "schemaVersion": 1,
+  "id": "walflip",
+  "title": "walflip architecture",
+  "revision": "2026-10-14",
+  "defaultDiagramId": "context",
+  "model": {
+    "elements": [
+      {
+        "status": "existing",
+        "tags": [],
+        "plannedNotes": [],
+        "docIds": [
+          "doc-operator"
+        ],
+        "sourceIds": [
+          "src-readme",
+          "src-main"
+        ],
+        "id": "operator",
+        "kind": "person",
+        "name": "Operator / developer",
+        "description": "Creates databases, runs every write through walflip exec, inspects history and clones past states. May set WALFLIP_ROOT and WALFLIP_DB."
+      },
+      {
+        "status": "existing",
+        "tags": [],
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-make",
+          "src-plan"
+        ],
+        "id": "ci-operator",
+        "kind": "person",
+        "name": "CI job or fuzzer operator",
+        "description": "Secondary consumer. Runs cargo test and cargo +nightly fuzz. No CI workflow file exists in the repo yet."
+      },
+      {
+        "status": "existing",
+        "tags": [],
+        "plannedNotes": [],
+        "docIds": [
+          "doc-decisions",
+          "doc-known-gaps"
+        ],
+        "sourceIds": [
+          "src-readme",
+          "src-cargo",
+          "src-lib"
+        ],
+        "id": "walflip",
+        "kind": "softwareSystem",
+        "name": "walflip",
+        "description": "Captures every committed SQLite transaction as WAL page images and rebuilds a database as of any commit.",
+        "technology": "Rust 2021 CLI + library"
+      },
+      {
+        "status": "existing",
+        "tags": [
+          "external"
+        ],
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-db",
+          "src-main"
+        ],
+        "id": "host-fs",
+        "kind": "softwareSystem",
+        "name": "Local disk (SQLite files)",
+        "description": "The host filesystem. Holds the data root (default walflip-data/ relative to the working directory) and the clone files.",
+        "technology": "POSIX filesystem, std::fs"
+      },
+      {
+        "status": "existing",
+        "tags": [
+          "external",
+          "unsupported"
+        ],
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-readme",
+          "src-plan"
+        ],
+        "id": "other-writers",
+        "kind": "softwareSystem",
+        "name": "Other programs that open live.db",
+        "description": "Unsupported. Their writes are not captured, and their checkpoints can fold WAL frames into live.db before walflip reads them.",
+        "technology": "Any SQLite writer"
+      },
+      {
+        "status": "existing",
+        "tags": [
+          "external"
+        ],
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-readme"
+        ],
+        "id": "sqlite-clients",
+        "kind": "softwareSystem",
+        "name": "Any SQLite client",
+        "description": "Opens a clone file. A clone is a standalone SQLite database with no WAL.",
+        "technology": "SQLite file format"
+      },
+      {
+        "status": "existing",
+        "tags": [
+          "external"
+        ],
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-cargo"
+        ],
+        "id": "sqlite-engine",
+        "kind": "softwareSystem",
+        "name": "SQLite engine (bundled)",
+        "description": "Third-party SQL engine compiled into the binary through rusqlite feature bundled. Owns journal_mode, checkpoints and the WAL writer.",
+        "technology": "rusqlite 0.32, bundled SQLite"
+      },
+      {
+        "status": "existing",
+        "tags": [],
+        "plannedNotes": [],
+        "docIds": [
+          "doc-cli"
+        ],
+        "sourceIds": [
+          "src-main"
+        ],
+        "id": "cli",
+        "kind": "container",
+        "parentId": "walflip",
+        "name": "walflip CLI binary",
+        "description": "Parses arguments and environment, calls one library operation per command and prints the returned data. No logic of its own.",
+        "technology": "Rust, clap 4 (derive, env)"
+      },
+      {
+        "status": "existing",
+        "tags": [],
+        "plannedNotes": [],
+        "docIds": [
+          "doc-decisions"
+        ],
+        "sourceIds": [
+          "src-lib"
+        ],
+        "id": "lib",
+        "kind": "container",
+        "parentId": "walflip",
+        "name": "walflip library crate",
+        "description": "Modules wal, replay, store and db. Returns plain data; never prints. Also linked directly by the test suites and the fuzz crate.",
+        "technology": "Rust, rusqlite 0.32 (bundled), anyhow"
+      },
+      {
+        "status": "existing",
+        "tags": [
+          "per-database-folder"
+        ],
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-db"
+        ],
+        "id": "live-db",
+        "kind": "container",
+        "containerType": "datastore",
+        "parentId": "walflip",
+        "name": "live.db",
+        "description": "The database you write to, in WAL journal mode. Only walflip exec may write it.",
+        "technology": "SQLite, journal_mode=WAL"
+      },
+      {
+        "status": "existing",
+        "tags": [
+          "per-database-folder",
+          "transient"
+        ],
+        "plannedNotes": [],
+        "docIds": [
+          "doc-wal-format"
+        ],
+        "sourceIds": [
+          "src-wal",
+          "src-store"
+        ],
+        "id": "live-wal",
+        "kind": "container",
+        "containerType": "datastore",
+        "parentId": "walflip",
+        "name": "live.db-wal",
+        "description": "SQLite write-ahead log beside live.db. walflip reads it as raw bytes after each commit. Absent after a checkpoint on close.",
+        "technology": "SQLite WAL file format"
+      },
+      {
+        "status": "existing",
+        "tags": [
+          "per-database-folder"
+        ],
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-db"
+        ],
+        "id": "base-db",
+        "kind": "container",
+        "containerType": "datastore",
+        "parentId": "walflip",
+        "name": "base.db",
+        "description": "Snapshot copied from live.db at create, after the schema ran and the WAL was checkpointed. clone -n 0 returns it.",
+        "technology": "SQLite file (byte copy)"
+      },
+      {
+        "status": "existing",
+        "tags": [
+          "per-database-folder"
+        ],
+        "plannedNotes": [],
+        "docIds": [
+          "doc-meta-schema"
+        ],
+        "sourceIds": [
+          "src-store"
+        ],
+        "id": "meta-db",
+        "kind": "container",
+        "containerType": "datastore",
+        "parentId": "walflip",
+        "name": "meta.db",
+        "description": "History store: tables meta (page_size, cursor_salt, cursor_commits), commits and frames (full page images).",
+        "technology": "SQLite: meta, commits, frames"
+      },
+      {
+        "status": "existing",
+        "tags": [],
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-db"
+        ],
+        "id": "clone-file",
+        "kind": "container",
+        "containerType": "datastore",
+        "parentId": "walflip",
+        "name": "Clone output file",
+        "description": "Database as of commit N at the -o path. walflip refuses to overwrite an existing file.",
+        "technology": "SQLite file, std::fs::write"
+      },
+      {
+        "status": "existing",
+        "tags": [],
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-wal",
+          "src-replay",
+          "src-store",
+          "src-db"
+        ],
+        "id": "unit-tests",
+        "kind": "container",
+        "parentId": "walflip",
+        "name": "In-crate unit and property tests",
+        "description": "#[cfg(test)] modules in wal, replay, store and db: WAL round-trip, truncation, corruption, no-panic; replay page-map model, composition, idempotence, max_pages bound; cursor cases; name validation.",
+        "technology": "cargo test, proptest 1"
+      },
+      {
+        "status": "existing",
+        "tags": [],
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-tests-roundtrip"
+        ],
+        "id": "roundtrip-tests",
+        "kind": "container",
+        "parentId": "walflip",
+        "name": "tests/roundtrip.rs",
+        "description": "Random insert/update/delete sequences on a real database; asserts clone -n k equals live contents after step k, single-WAL batches and idempotent capture.",
+        "technology": "proptest (24 cases), tempfile; links the library"
+      },
+      {
+        "status": "existing",
+        "tags": [],
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-tests-cli",
+          "src-tests-common",
+          "src-tests-invariants",
+          "src-tests-model"
+        ],
+        "id": "cli-tests",
+        "kind": "container",
+        "parentId": "walflip",
+        "name": "tests/cli.rs + tests/common",
+        "description": "End-to-end scenarios that spawn the compiled binary through Harness, compare against a shadow SQLite Model and check the invariant catalog through the library.",
+        "technology": "std::process::Command, CARGO_BIN_EXE_walflip, rusqlite"
+      },
+      {
+        "status": "mixed",
+        "tags": [],
+        "plannedNotes": [
+          "Planned by TESTING_PLAN.md section 2.1, not present: wal_differential, replay_apply, store_capture and statements_split targets, plus fuzz/wal.dict."
+        ],
+        "docIds": [],
+        "sourceIds": [
+          "src-fuzz",
+          "src-fuzz-cargo",
+          "src-plan"
+        ],
+        "id": "fuzz",
+        "kind": "container",
+        "parentId": "walflip",
+        "name": "walflip-fuzz crate",
+        "description": "cargo-fuzz crate with one target, wal_parse: raw bytes into wal::parse, asserting no panic and internal consistency. Seeded corpus in fuzz/corpus/wal_parse.",
+        "technology": "libfuzzer-sys 0.4, Rust nightly, walflip feature testing"
+      },
+      {
+        "status": "existing",
+        "tags": [],
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-seed",
+          "src-example",
+          "src-make"
+        ],
+        "id": "seed-script",
+        "kind": "container",
+        "parentId": "walflip",
+        "name": "scripts/seed.sh + examples/processes.sql",
+        "description": "Demo tooling. Samples ps twice, generates 250 INSERT, 150 UPDATE and 100 DELETE statements, and feeds them to the binary. Fails unless status reports 500 commits.",
+        "technology": "bash, awk, ps"
+      },
+      {
+        "status": "existing",
+        "tags": [
+          "io"
+        ],
+        "plannedNotes": [],
+        "docIds": [
+          "doc-c-db"
+        ],
+        "sourceIds": [
+          "src-db"
+        ],
+        "id": "c-db",
+        "kind": "component",
+        "parentId": "lib",
+        "name": "db",
+        "description": "I/O shell. Db paths and name validation, parse_statements, create, list, rename, drop_db, exec, log, status, clone_at, summarize. Returns structs; never prints.",
+        "technology": "Rust module, rusqlite, std::fs"
+      },
+      {
+        "status": "existing",
+        "tags": [
+          "io"
+        ],
+        "plannedNotes": [],
+        "docIds": [
+          "doc-meta-schema"
+        ],
+        "sourceIds": [
+          "src-store"
+        ],
+        "id": "c-store",
+        "kind": "component",
+        "parentId": "lib",
+        "name": "store",
+        "description": "I/O shell around meta.db. Store::open creates the schema; capture reads the WAL file, parses it and inserts new commits atomically. Contains the pure function commits_seen.",
+        "technology": "Rust module, rusqlite, std::fs"
+      },
+      {
+        "status": "existing",
+        "tags": [
+          "pure"
+        ],
+        "plannedNotes": [],
+        "docIds": [
+          "doc-wal-format"
+        ],
+        "sourceIds": [
+          "src-wal"
+        ],
+        "id": "c-wal",
+        "kind": "component",
+        "parentId": "lib",
+        "name": "wal",
+        "description": "Pure WAL parser: header, byte order, salts, chained checksums, commit grouping. Borrows pages from the input buffer. Reference encoder behind cfg(test) or feature testing.",
+        "technology": "Rust module, no I/O"
+      },
+      {
+        "status": "existing",
+        "tags": [
+          "pure"
+        ],
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-replay"
+        ],
+        "id": "c-replay",
+        "kind": "component",
+        "parentId": "lib",
+        "name": "replay",
+        "description": "Pure page replay onto an in-memory image: validate all frames against max_pages first, overwrite at (pgno-1)*page_size, then resize to db_pages.",
+        "technology": "Rust module, no I/O"
+      },
+      {
+        "status": "existing",
+        "tags": [
+          "external",
+          "io"
+        ],
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-main"
+        ],
+        "id": "c-main",
+        "kind": "component",
+        "parentId": "cli",
+        "name": "main.rs (clap layer)",
+        "description": "Cli and Cmd clap types, main dispatch, read_schema (file or stdin) and report. Output formatting only. Shown as a supporting component from the CLI container.",
+        "technology": "Rust, clap 4 derive, anyhow"
+      },
+      {
+        "status": "existing",
+        "tags": [],
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-wal"
+        ],
+        "id": "k-wal-parse",
+        "kind": "code",
+        "parentId": "c-wal",
+        "symbolKind": "function",
+        "name": "parse",
+        "description": "Returns Ok(None) for a short buffer or bad header checksum, Err for bad magic or page size, else the committed prefix.",
+        "members": [
+          {
+            "name": "parse",
+            "signature": "pub fn parse(buf: &[u8]) -> Result<Option<Wal<'_>>>"
+          }
+        ]
+      },
+      {
+        "status": "existing",
+        "tags": [],
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-wal"
+        ],
+        "id": "k-wal-checksum",
+        "kind": "code",
+        "parentId": "c-wal",
+        "symbolKind": "function",
+        "name": "checksum",
+        "description": "SQLite running checksum over 8-byte chunks; byte order chosen by the magic number.",
+        "members": [
+          {
+            "name": "checksum",
+            "signature": "fn checksum(big_endian: bool, data: &[u8], s0: u32, s1: u32) -> (u32, u32)",
+            "visibility": "private"
+          }
+        ]
+      },
+      {
+        "status": "existing",
+        "tags": [],
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-wal"
+        ],
+        "id": "k-wal-wal",
+        "kind": "code",
+        "parentId": "c-wal",
+        "symbolKind": "type",
+        "name": "Wal",
+        "description": "Parsed WAL generation.",
+        "members": [
+          {
+            "name": "page_size",
+            "signature": "u32"
+          },
+          {
+            "name": "salt",
+            "signature": "(u32, u32)"
+          },
+          {
+            "name": "commits",
+            "signature": "Vec<Commit<'a>>"
+          }
+        ]
+      },
+      {
+        "status": "existing",
+        "tags": [],
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-wal"
+        ],
+        "id": "k-wal-commit",
+        "kind": "code",
+        "parentId": "c-wal",
+        "symbolKind": "type",
+        "name": "Commit",
+        "description": "Frames up to and including a commit frame.",
+        "members": [
+          {
+            "name": "frames",
+            "signature": "Vec<Frame<'a>>"
+          },
+          {
+            "name": "db_pages",
+            "signature": "u32 (db size after the commit)"
+          }
+        ]
+      },
+      {
+        "status": "existing",
+        "tags": [],
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-wal"
+        ],
+        "id": "k-wal-frame",
+        "kind": "code",
+        "parentId": "c-wal",
+        "symbolKind": "type",
+        "name": "Frame",
+        "description": "One page image borrowed from the WAL buffer.",
+        "members": [
+          {
+            "name": "pgno",
+            "signature": "u32"
+          },
+          {
+            "name": "page",
+            "signature": "&'a [u8]"
+          }
+        ]
+      },
+      {
+        "status": "existing",
+        "tags": [
+          "testing-feature"
+        ],
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-wal",
+          "src-cargo"
+        ],
+        "id": "k-wal-encode",
+        "kind": "code",
+        "parentId": "c-wal",
+        "symbolKind": "module",
+        "name": "encode",
+        "description": "Reference WAL encoder used as a test oracle. Compiled only with cfg(test) or feature testing (the fuzz crate enables it).",
+        "members": [
+          {
+            "name": "encode",
+            "signature": "pub fn encode(big_endian: bool, salt: (u32, u32), page_size: u32, commits: &[Commit]) -> Vec<u8>"
+          }
+        ]
+      },
+      {
+        "status": "existing",
+        "tags": [],
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-store"
+        ],
+        "id": "k-store",
+        "kind": "code",
+        "parentId": "c-store",
+        "symbolKind": "class",
+        "name": "Store",
+        "description": "Owns the meta.db connection.",
+        "members": [
+          {
+            "name": "open",
+            "signature": "pub fn open(path: &Path) -> Result<Self>"
+          },
+          {
+            "name": "get / set",
+            "signature": "meta key-value access"
+          },
+          {
+            "name": "page_size",
+            "signature": "pub fn page_size(&self) -> Result<Option<u64>>"
+          },
+          {
+            "name": "commit_count",
+            "signature": "pub fn commit_count(&self) -> Result<u64>"
+          },
+          {
+            "name": "capture",
+            "signature": "pub fn capture(&mut self, wal_path: &Path, label: &str) -> Result<usize>"
+          },
+          {
+            "name": "conn",
+            "signature": "pub fn conn(&self) -> &Connection"
+          }
+        ]
+      },
+      {
+        "status": "existing",
+        "tags": [
+          "pure"
+        ],
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-store"
+        ],
+        "id": "k-commits-seen",
+        "kind": "code",
+        "parentId": "c-store",
+        "symbolKind": "function",
+        "name": "commits_seen",
+        "description": "Pure cursor rule: same salt returns the stored count; different salt, missing or junk returns 0.",
+        "members": [
+          {
+            "name": "commits_seen",
+            "signature": "pub fn commits_seen(stored_salt: Option<&str>, stored_commits: Option<&str>, salt: (u32, u32)) -> usize"
+          }
+        ]
+      },
+      {
+        "status": "existing",
+        "tags": [],
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-store"
+        ],
+        "id": "k-t-meta",
+        "kind": "code",
+        "parentId": "c-store",
+        "symbolKind": "table",
+        "name": "meta",
+        "description": "Key-value facts. Keys used: page_size, cursor_salt (salt1:salt2), cursor_commits.",
+        "members": [
+          {
+            "name": "key",
+            "signature": "TEXT PRIMARY KEY"
+          },
+          {
+            "name": "value",
+            "signature": "TEXT NOT NULL"
+          }
+        ]
+      },
+      {
+        "status": "existing",
+        "tags": [],
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-store"
+        ],
+        "id": "k-t-commits",
+        "kind": "code",
+        "parentId": "c-store",
+        "symbolKind": "table",
+        "name": "commits",
+        "description": "One row per captured commit, 1-based.",
+        "members": [
+          {
+            "name": "idx",
+            "signature": "INTEGER PRIMARY KEY"
+          },
+          {
+            "name": "label",
+            "signature": "TEXT NOT NULL (the SQL statement)"
+          },
+          {
+            "name": "db_pages",
+            "signature": "INTEGER NOT NULL"
+          },
+          {
+            "name": "committed_at",
+            "signature": "TEXT DEFAULT CURRENT_TIMESTAMP"
+          }
+        ]
+      },
+      {
+        "status": "existing",
+        "tags": [],
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-store"
+        ],
+        "id": "k-t-frames",
+        "kind": "code",
+        "parentId": "c-store",
+        "symbolKind": "table",
+        "name": "frames",
+        "description": "Full page images in commit order.",
+        "members": [
+          {
+            "name": "commit_idx",
+            "signature": "INTEGER NOT NULL REFERENCES commits(idx)"
+          },
+          {
+            "name": "seq",
+            "signature": "INTEGER NOT NULL"
+          },
+          {
+            "name": "pgno",
+            "signature": "INTEGER NOT NULL"
+          },
+          {
+            "name": "page",
+            "signature": "BLOB NOT NULL"
+          },
+          {
+            "name": "PRIMARY KEY",
+            "signature": "(commit_idx, seq)"
+          }
+        ]
+      },
+      {
+        "status": "existing",
+        "tags": [],
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-make",
+          "src-readme"
+        ],
+        "id": "dn-host",
+        "kind": "deploymentNode",
+        "name": "Developer machine",
+        "description": "Unix-like OS with a Rust toolchain 1.75+. SQLite is bundled, so no system SQLite is needed.",
+        "technology": "macOS or Linux, cargo",
+        "environment": "developer-machine"
+      },
+      {
+        "status": "existing",
+        "tags": [],
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-make",
+          "src-readme"
+        ],
+        "id": "dn-cargo-bin",
+        "kind": "deploymentNode",
+        "name": "~/.cargo/bin",
+        "description": "Install target of cargo install --path .",
+        "technology": "cargo install",
+        "environment": "developer-machine",
+        "parentId": "dn-host"
+      },
+      {
+        "status": "existing",
+        "tags": [],
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-make",
+          "src-readme"
+        ],
+        "id": "i-cli-installed",
+        "kind": "instance",
+        "name": "walflip (installed)",
+        "description": "Binary on PATH for everyday use.",
+        "instanceOf": "cli",
+        "parentId": "dn-cargo-bin",
+        "environment": "developer-machine"
+      },
+      {
+        "status": "existing",
+        "tags": [],
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-make",
+          "src-readme"
+        ],
+        "id": "dn-target",
+        "kind": "deploymentNode",
+        "name": "target/release",
+        "description": "Output of cargo build --release (make build). make seed and make demo use this binary.",
+        "technology": "cargo build --release",
+        "environment": "developer-machine",
+        "parentId": "dn-host"
+      },
+      {
+        "status": "existing",
+        "tags": [],
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-make",
+          "src-readme"
+        ],
+        "id": "i-cli-release",
+        "kind": "instance",
+        "name": "walflip (target/release)",
+        "description": "Binary that the Makefile and seed script run.",
+        "instanceOf": "cli",
+        "parentId": "dn-target",
+        "environment": "developer-machine"
+      },
+      {
+        "status": "existing",
+        "tags": [],
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-make"
+        ],
+        "id": "infra-make",
+        "kind": "infrastructureNode",
+        "parentId": "dn-host",
+        "name": "Makefile targets",
+        "description": "build, test, fuzz (FUZZ_SECS, default 30), seed, demo, clean, distclean.",
+        "technology": "make"
+      },
+      {
+        "status": "existing",
+        "tags": [],
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-make",
+          "src-readme"
+        ],
+        "id": "dn-data-root",
+        "kind": "deploymentNode",
+        "name": "walflip-data/",
+        "description": "Data root. --root or WALFLIP_ROOT; the default is relative to the working directory. Ignored by git.",
+        "technology": "Directory on local disk",
+        "environment": "developer-machine",
+        "parentId": "dn-host"
+      },
+      {
+        "status": "existing",
+        "tags": [],
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-make",
+          "src-readme"
+        ],
+        "id": "dn-db-folder",
+        "kind": "deploymentNode",
+        "name": "walflip-data/NAME/",
+        "description": "One folder per database. make seed creates processes/.",
+        "technology": "Directory",
+        "environment": "developer-machine",
+        "parentId": "dn-data-root"
+      },
+      {
+        "status": "existing",
+        "tags": [],
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-make",
+          "src-readme"
+        ],
+        "id": "i-live-db",
+        "kind": "instance",
+        "name": "live.db",
+        "description": "Live database file.",
+        "instanceOf": "live-db",
+        "parentId": "dn-db-folder",
+        "environment": "developer-machine"
+      },
+      {
+        "status": "existing",
+        "tags": [],
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-make",
+          "src-readme"
+        ],
+        "id": "i-live-wal",
+        "kind": "instance",
+        "name": "live.db-wal",
+        "description": "Present only while a connection is open or after an unclean close.",
+        "instanceOf": "live-wal",
+        "parentId": "dn-db-folder",
+        "environment": "developer-machine"
+      },
+      {
+        "status": "existing",
+        "tags": [],
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-make",
+          "src-readme"
+        ],
+        "id": "i-base-db",
+        "kind": "instance",
+        "name": "base.db",
+        "description": "Base snapshot.",
+        "instanceOf": "base-db",
+        "parentId": "dn-db-folder",
+        "environment": "developer-machine"
+      },
+      {
+        "status": "existing",
+        "tags": [],
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-make",
+          "src-readme"
+        ],
+        "id": "i-meta-db",
+        "kind": "instance",
+        "name": "meta.db",
+        "description": "History store.",
+        "instanceOf": "meta-db",
+        "parentId": "dn-db-folder",
+        "environment": "developer-machine"
+      },
+      {
+        "status": "existing",
+        "tags": [],
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-make",
+          "src-readme"
+        ],
+        "id": "dn-tmp",
+        "kind": "deploymentNode",
+        "name": "/tmp",
+        "description": "make demo writes /tmp/at250.db and /tmp/at500.db; make clean removes them.",
+        "technology": "Directory",
+        "environment": "developer-machine",
+        "parentId": "dn-host"
+      },
+      {
+        "status": "existing",
+        "tags": [],
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-make",
+          "src-readme"
+        ],
+        "id": "i-clone",
+        "kind": "instance",
+        "name": "at250.db / at500.db",
+        "description": "Clones produced by make demo.",
+        "instanceOf": "clone-file",
+        "parentId": "dn-tmp",
+        "environment": "developer-machine"
+      },
+      {
+        "status": "existing",
+        "tags": [],
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-make",
+          "src-readme"
+        ],
+        "id": "dn-nightly",
+        "kind": "deploymentNode",
+        "name": "Rust nightly + cargo-fuzz",
+        "description": "Needed only for make fuzz. Build output in fuzz/target, crashes in fuzz/artifacts (both ignored by git).",
+        "technology": "cargo +nightly fuzz",
+        "environment": "developer-machine",
+        "parentId": "dn-host"
+      },
+      {
+        "status": "existing",
+        "tags": [],
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-make",
+          "src-readme"
+        ],
+        "id": "i-fuzz",
+        "kind": "instance",
+        "name": "wal_parse fuzz target",
+        "description": "Runs with -max_total_time=FUZZ_SECS.",
+        "instanceOf": "fuzz",
+        "parentId": "dn-nightly",
+        "environment": "developer-machine"
+      },
+      {
+        "status": "planned",
+        "tags": [],
+        "plannedNotes": [
+          "Planned in TESTING_PLAN.md section 2.4. The repository has no CI workflow file yet."
+        ],
+        "docIds": [],
+        "sourceIds": [
+          "src-plan"
+        ],
+        "id": "dn-ci",
+        "kind": "deploymentNode",
+        "name": "CI runner (planned)",
+        "description": "Planned runner for PR and nightly jobs.",
+        "technology": "Unspecified CI, Rust stable + nightly",
+        "environment": "ci-planned"
+      },
+      {
+        "status": "planned",
+        "tags": [],
+        "plannedNotes": [
+          "Planned in TESTING_PLAN.md section 2.4. The repository has no CI workflow file yet."
+        ],
+        "docIds": [],
+        "sourceIds": [
+          "src-plan"
+        ],
+        "id": "infra-ci-schedule",
+        "kind": "infrastructureNode",
+        "parentId": "dn-ci",
+        "name": "Nightly and PR triggers (planned)",
+        "description": "Nightly: each fuzz target for 300 s with -rss_limit_mb=1024. PR: cargo fuzz build and corpus replay with -runs=0.",
+        "technology": "CI scheduler"
+      },
+      {
+        "status": "planned",
+        "tags": [],
+        "plannedNotes": [
+          "Planned in TESTING_PLAN.md section 2.4. The repository has no CI workflow file yet."
+        ],
+        "docIds": [],
+        "sourceIds": [
+          "src-plan"
+        ],
+        "id": "i-ci-fuzz",
+        "kind": "instance",
+        "parentId": "dn-ci",
+        "instanceOf": "fuzz",
+        "environment": "ci-planned",
+        "name": "Fuzz targets (planned job)",
+        "description": "wal_parse today; more targets planned."
+      },
+      {
+        "status": "planned",
+        "tags": [],
+        "plannedNotes": [
+          "Planned in TESTING_PLAN.md section 2.4. The repository has no CI workflow file yet."
+        ],
+        "docIds": [],
+        "sourceIds": [
+          "src-plan"
+        ],
+        "id": "i-ci-tests",
+        "kind": "instance",
+        "parentId": "dn-ci",
+        "instanceOf": "cli-tests",
+        "environment": "ci-planned",
+        "name": "cargo test (planned job)",
+        "description": "Unit, property, round-trip and end-to-end suites."
+      }
+    ],
+    "relationships": [
+      {
+        "id": "ctx-op-wf",
+        "sourceId": "operator",
+        "targetId": "walflip",
+        "label": "Creates dbs, runs SQL, inspects history, clones commits",
+        "technology": "CLI args, env, stdin, stdout",
+        "status": "existing",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-main"
+        ]
+      },
+      {
+        "id": "ctx-ci-wf",
+        "sourceId": "ci-operator",
+        "targetId": "walflip",
+        "label": "Runs tests and fuzzing",
+        "technology": "cargo test, cargo +nightly fuzz",
+        "status": "existing",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-make"
+        ]
+      },
+      {
+        "id": "ctx-wf-fs",
+        "sourceId": "walflip",
+        "targetId": "host-fs",
+        "label": "Stores live db, snapshot and history; writes clones",
+        "technology": "SQLite via rusqlite, std::fs",
+        "status": "existing",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-db"
+        ]
+      },
+      {
+        "id": "ctx-other-fs",
+        "sourceId": "other-writers",
+        "targetId": "host-fs",
+        "label": "Unsupported: writes live.db directly, not captured",
+        "technology": "SQLite",
+        "status": "existing",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-readme"
+        ]
+      },
+      {
+        "id": "ctx-client-fs",
+        "sourceId": "sqlite-clients",
+        "targetId": "host-fs",
+        "label": "Opens clone files",
+        "technology": "SQLite file format",
+        "status": "existing",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-readme"
+        ]
+      },
+      {
+        "id": "op-cli",
+        "sourceId": "operator",
+        "targetId": "cli",
+        "label": "Runs commands",
+        "technology": "argv, WALFLIP_ROOT, WALFLIP_DB, stdin",
+        "status": "existing",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-main"
+        ]
+      },
+      {
+        "id": "cli-lib",
+        "sourceId": "cli",
+        "targetId": "lib",
+        "label": "Calls one db operation per command; prints returned data",
+        "technology": "Rust calls (walflip::db)",
+        "status": "existing",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-main"
+        ]
+      },
+      {
+        "id": "lib-live",
+        "sourceId": "lib",
+        "targetId": "live-db",
+        "label": "Runs each statement as one transaction, autocheckpoint off",
+        "technology": "rusqlite Connection",
+        "status": "existing",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-db"
+        ]
+      },
+      {
+        "id": "lib-wal",
+        "sourceId": "lib",
+        "targetId": "live-wal",
+        "label": "Reads raw WAL bytes after each commit",
+        "technology": "std::fs::read",
+        "status": "existing",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-store"
+        ]
+      },
+      {
+        "id": "lib-base",
+        "sourceId": "lib",
+        "targetId": "base-db",
+        "label": "Copies at create; reads as replay base at clone",
+        "technology": "std::fs::copy, std::fs::read",
+        "status": "existing",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-db"
+        ]
+      },
+      {
+        "id": "lib-meta",
+        "sourceId": "lib",
+        "targetId": "meta-db",
+        "label": "Stores commits, frames and cursor; reads them back",
+        "technology": "rusqlite, SQL",
+        "status": "existing",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-store",
+          "src-db"
+        ]
+      },
+      {
+        "id": "lib-clone",
+        "sourceId": "lib",
+        "targetId": "clone-file",
+        "label": "Writes rebuilt image; checks it read-only",
+        "technology": "std::fs::write, SQLite immutable=1",
+        "status": "existing",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-db"
+        ]
+      },
+      {
+        "id": "live-appends-wal",
+        "sourceId": "live-db",
+        "targetId": "live-wal",
+        "label": "SQLite appends page frames on commit",
+        "technology": "SQLite WAL writer",
+        "status": "existing",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-wal"
+        ]
+      },
+      {
+        "id": "other-live",
+        "sourceId": "other-writers",
+        "targetId": "live-db",
+        "label": "Unsupported direct writes and checkpoints",
+        "technology": "SQLite",
+        "status": "existing",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-readme"
+        ]
+      },
+      {
+        "id": "client-clone",
+        "sourceId": "sqlite-clients",
+        "targetId": "clone-file",
+        "label": "Opens the rebuilt database",
+        "technology": "SQLite file format",
+        "status": "existing",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-readme"
+        ]
+      },
+      {
+        "id": "ci-unit",
+        "sourceId": "ci-operator",
+        "targetId": "unit-tests",
+        "label": "Runs",
+        "technology": "cargo test (make test)",
+        "status": "existing",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-make"
+        ]
+      },
+      {
+        "id": "ci-roundtrip",
+        "sourceId": "ci-operator",
+        "targetId": "roundtrip-tests",
+        "label": "Runs",
+        "technology": "cargo test",
+        "status": "existing",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-make"
+        ]
+      },
+      {
+        "id": "ci-cli-tests",
+        "sourceId": "ci-operator",
+        "targetId": "cli-tests",
+        "label": "Runs",
+        "technology": "cargo test",
+        "status": "existing",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-make"
+        ]
+      },
+      {
+        "id": "ci-fuzz",
+        "sourceId": "ci-operator",
+        "targetId": "fuzz",
+        "label": "Runs wal_parse for FUZZ_SECS",
+        "technology": "cargo +nightly fuzz run (make fuzz)",
+        "status": "existing",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-make"
+        ]
+      },
+      {
+        "id": "op-seed",
+        "sourceId": "operator",
+        "targetId": "seed-script",
+        "label": "Seeds a 500-commit demo database",
+        "technology": "make seed, make demo",
+        "status": "existing",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-make"
+        ]
+      },
+      {
+        "id": "unit-lib",
+        "sourceId": "unit-tests",
+        "targetId": "lib",
+        "label": "Tests module internals in place",
+        "technology": "#[cfg(test)], proptest",
+        "status": "existing",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-wal",
+          "src-replay"
+        ]
+      },
+      {
+        "id": "roundtrip-lib",
+        "sourceId": "roundtrip-tests",
+        "targetId": "lib",
+        "label": "Calls create, exec, clone_at, summarize directly",
+        "technology": "Rust calls, tempfile",
+        "status": "existing",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-tests-roundtrip"
+        ]
+      },
+      {
+        "id": "clitests-cli",
+        "sourceId": "cli-tests",
+        "targetId": "cli",
+        "label": "Drives the compiled binary",
+        "technology": "std::process::Command",
+        "status": "existing",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-tests-common"
+        ]
+      },
+      {
+        "id": "clitests-lib",
+        "sourceId": "cli-tests",
+        "targetId": "lib",
+        "label": "Checks invariants via db::list and clone_at; reads meta.db read-only",
+        "technology": "Rust calls, rusqlite immutable=1",
+        "status": "existing",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-tests-invariants"
+        ]
+      },
+      {
+        "id": "clitests-seed",
+        "sourceId": "cli-tests",
+        "targetId": "seed-script",
+        "label": "Runs the seed script (scenario 11)",
+        "technology": "bash",
+        "status": "existing",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-tests-cli"
+        ]
+      },
+      {
+        "id": "fuzz-lib",
+        "sourceId": "fuzz",
+        "targetId": "lib",
+        "label": "Feeds raw bytes to wal::parse",
+        "technology": "libFuzzer, feature testing",
+        "status": "existing",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-fuzz"
+        ]
+      },
+      {
+        "id": "seed-cli",
+        "sourceId": "seed-script",
+        "targetId": "cli",
+        "label": "Runs drop, create --schema, exec -, status",
+        "technology": "bash subprocess",
+        "status": "existing",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-seed"
+        ]
+      },
+      {
+        "id": "op-main",
+        "sourceId": "operator",
+        "targetId": "c-main",
+        "label": "Runs commands",
+        "technology": "CLI",
+        "status": "existing",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-main"
+        ]
+      },
+      {
+        "id": "main-fs",
+        "sourceId": "c-main",
+        "targetId": "host-fs",
+        "label": "Reads the schema file",
+        "technology": "std::fs::read_to_string or stdin",
+        "status": "existing",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-main"
+        ]
+      },
+      {
+        "id": "main-db",
+        "sourceId": "c-main",
+        "targetId": "c-db",
+        "label": "Calls operations; receives Created, DbSummary, LogEntry, Status, Summary",
+        "technology": "Rust calls",
+        "status": "existing",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-main"
+        ]
+      },
+      {
+        "id": "db-store",
+        "sourceId": "c-db",
+        "targetId": "c-store",
+        "label": "Opens Store; capture; page_size, commit_count; queries through conn()",
+        "technology": "Rust calls",
+        "status": "existing",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-db"
+        ]
+      },
+      {
+        "id": "db-replay",
+        "sourceId": "c-db",
+        "targetId": "c-replay",
+        "label": "apply(image, page_size, frames, db_pages, max_pages)",
+        "technology": "Rust call on Vec<u8>",
+        "status": "existing",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-db",
+          "src-replay"
+        ]
+      },
+      {
+        "id": "store-wal",
+        "sourceId": "c-store",
+        "targetId": "c-wal",
+        "label": "parse(bytes) -> Option<Wal>",
+        "technology": "Rust call on &[u8]",
+        "status": "existing",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-store"
+        ]
+      },
+      {
+        "id": "db-sqlite",
+        "sourceId": "c-db",
+        "targetId": "sqlite-engine",
+        "label": "Opens live.db, runs statements, checkpoint at create, integrity_check",
+        "technology": "rusqlite",
+        "status": "existing",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-db"
+        ]
+      },
+      {
+        "id": "store-sqlite",
+        "sourceId": "c-store",
+        "targetId": "sqlite-engine",
+        "label": "Reads and writes meta.db in one transaction per capture",
+        "technology": "rusqlite",
+        "status": "existing",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-store"
+        ]
+      },
+      {
+        "id": "store-fs",
+        "sourceId": "c-store",
+        "targetId": "host-fs",
+        "label": "Reads live.db-wal bytes",
+        "technology": "std::fs::read",
+        "status": "existing",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-store"
+        ]
+      },
+      {
+        "id": "db-fs",
+        "sourceId": "c-db",
+        "targetId": "host-fs",
+        "label": "Creates, copies, reads, writes, renames and removes files",
+        "technology": "std::fs",
+        "status": "existing",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-db"
+        ]
+      },
+      {
+        "id": "db-live",
+        "sourceId": "c-db",
+        "targetId": "live-db",
+        "label": "Opens and writes live.db",
+        "technology": "rusqlite Connection",
+        "status": "existing",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-db"
+        ]
+      },
+      {
+        "id": "db-base",
+        "sourceId": "c-db",
+        "targetId": "base-db",
+        "label": "Copies or reads base.db",
+        "technology": "std::fs",
+        "status": "existing",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-db"
+        ]
+      },
+      {
+        "id": "db-clone",
+        "sourceId": "c-db",
+        "targetId": "clone-file",
+        "label": "Writes and checks the clone",
+        "technology": "std::fs::write, SQLite immutable=1",
+        "status": "existing",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-db"
+        ]
+      },
+      {
+        "id": "db-livewal",
+        "sourceId": "c-db",
+        "targetId": "live-wal",
+        "label": "Reports WAL size",
+        "technology": "std::fs::metadata",
+        "status": "existing",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-db"
+        ]
+      },
+      {
+        "id": "store-meta",
+        "sourceId": "c-store",
+        "targetId": "meta-db",
+        "label": "Reads and writes history tables",
+        "technology": "rusqlite, SQL",
+        "status": "existing",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-store"
+        ]
+      },
+      {
+        "id": "store-livewal",
+        "sourceId": "c-store",
+        "targetId": "live-wal",
+        "label": "Reads WAL bytes",
+        "technology": "std::fs::read",
+        "status": "existing",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-store"
+        ]
+      },
+      {
+        "id": "k-parse-checksum",
+        "sourceId": "k-wal-parse",
+        "targetId": "k-wal-checksum",
+        "label": "Verifies header and chained frame checksums",
+        "technology": "function call",
+        "status": "existing",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": []
+      },
+      {
+        "id": "k-parse-wal",
+        "sourceId": "k-wal-parse",
+        "targetId": "k-wal-wal",
+        "label": "Returns",
+        "technology": "Result<Option<Wal>>",
+        "status": "existing",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": []
+      },
+      {
+        "id": "k-wal-commits",
+        "sourceId": "k-wal-wal",
+        "targetId": "k-wal-commit",
+        "label": "Holds commits in order",
+        "technology": "Vec",
+        "status": "existing",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [],
+        "kind": "composition"
+      },
+      {
+        "id": "k-commit-frames",
+        "sourceId": "k-wal-commit",
+        "targetId": "k-wal-frame",
+        "label": "Holds frames in order",
+        "technology": "Vec",
+        "status": "existing",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [],
+        "kind": "composition"
+      },
+      {
+        "id": "k-encode-checksum",
+        "sourceId": "k-wal-encode",
+        "targetId": "k-wal-checksum",
+        "label": "Shares the checksum primitive",
+        "technology": "function call",
+        "status": "existing",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": []
+      },
+      {
+        "id": "k-store-seen",
+        "sourceId": "k-store",
+        "targetId": "k-commits-seen",
+        "label": "capture computes commits already stored",
+        "technology": "function call",
+        "status": "existing",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": []
+      },
+      {
+        "id": "k-store-meta",
+        "sourceId": "k-store",
+        "targetId": "k-t-meta",
+        "label": "Reads page_size and cursor; writes cursor",
+        "technology": "SQL",
+        "status": "existing",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": []
+      },
+      {
+        "id": "k-store-commits",
+        "sourceId": "k-store",
+        "targetId": "k-t-commits",
+        "label": "Inserts one row per new commit",
+        "technology": "SQL INSERT",
+        "status": "existing",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": []
+      },
+      {
+        "id": "k-store-frames",
+        "sourceId": "k-store",
+        "targetId": "k-t-frames",
+        "label": "Inserts page images",
+        "technology": "SQL INSERT",
+        "status": "existing",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": []
+      },
+      {
+        "id": "k-frames-commits",
+        "sourceId": "k-t-frames",
+        "targetId": "k-t-commits",
+        "label": "commit_idx references idx",
+        "technology": "foreign key",
+        "status": "existing",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [],
+        "kind": "association"
+      },
+      {
+        "id": "d-make-cli",
+        "sourceId": "infra-make",
+        "targetId": "i-cli-release",
+        "label": "make seed / make demo run this binary",
+        "technology": "bash, WALFLIP=target/release/walflip",
+        "status": "existing",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": []
+      },
+      {
+        "id": "d-make-fuzz",
+        "sourceId": "infra-make",
+        "targetId": "i-fuzz",
+        "label": "make fuzz",
+        "technology": "cargo +nightly fuzz run wal_parse",
+        "status": "existing",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": []
+      },
+      {
+        "id": "d-cli-live",
+        "sourceId": "i-cli-release",
+        "targetId": "i-live-db",
+        "label": "exec writes",
+        "technology": "rusqlite",
+        "status": "existing",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": []
+      },
+      {
+        "id": "d-cli-wal",
+        "sourceId": "i-cli-release",
+        "targetId": "i-live-wal",
+        "label": "Reads WAL bytes",
+        "technology": "std::fs::read",
+        "status": "existing",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": []
+      },
+      {
+        "id": "d-cli-base",
+        "sourceId": "i-cli-release",
+        "targetId": "i-base-db",
+        "label": "Copies or reads snapshot",
+        "technology": "std::fs",
+        "status": "existing",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": []
+      },
+      {
+        "id": "d-cli-meta",
+        "sourceId": "i-cli-release",
+        "targetId": "i-meta-db",
+        "label": "Writes and reads history",
+        "technology": "rusqlite",
+        "status": "existing",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": []
+      },
+      {
+        "id": "d-cli-clone",
+        "sourceId": "i-cli-release",
+        "targetId": "i-clone",
+        "label": "make demo clones -n 250 and -n 500",
+        "technology": "std::fs::write",
+        "status": "existing",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": []
+      },
+      {
+        "id": "d-installed-live",
+        "sourceId": "i-cli-installed",
+        "targetId": "i-live-db",
+        "label": "Same layout when run from the same working directory",
+        "technology": "rusqlite",
+        "status": "existing",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": []
+      },
+      {
+        "id": "d-ci-fuzz",
+        "sourceId": "infra-ci-schedule",
+        "targetId": "i-ci-fuzz",
+        "label": "Nightly fuzz run (planned)",
+        "technology": "cargo +nightly fuzz run, 300 s per target",
+        "status": "planned",
+        "plannedNotes": [
+          "TESTING_PLAN.md section 2.4"
+        ],
+        "docIds": [],
+        "sourceIds": [
+          "src-plan"
+        ]
+      },
+      {
+        "id": "d-ci-tests",
+        "sourceId": "infra-ci-schedule",
+        "targetId": "i-ci-tests",
+        "label": "PR test run (planned)",
+        "technology": "cargo test",
+        "status": "planned",
+        "plannedNotes": [
+          "TESTING_PLAN.md section 2.4"
+        ],
+        "docIds": [],
+        "sourceIds": [
+          "src-plan"
+        ]
+      }
+    ]
+  },
+  "diagrams": [
+    {
+      "id": "context",
+      "kind": "context",
+      "title": "walflip: system context",
+      "status": "existing",
+      "scopeId": "walflip",
+      "related": [
+        {
+          "diagramId": "containers-verification",
+          "label": "Containers: tests, fuzzing and tooling"
+        }
+      ],
+      "nodes": [
+        {
+          "elementId": "operator"
+        },
+        {
+          "elementId": "ci-operator"
+        },
+        {
+          "elementId": "walflip",
+          "detail": {
+            "diagramId": "containers-runtime"
+          }
+        },
+        {
+          "elementId": "host-fs"
+        },
+        {
+          "elementId": "other-writers"
+        },
+        {
+          "elementId": "sqlite-clients"
+        }
+      ],
+      "edges": [
+        {
+          "relationshipId": "ctx-op-wf"
+        },
+        {
+          "relationshipId": "ctx-ci-wf"
+        },
+        {
+          "relationshipId": "ctx-wf-fs"
+        },
+        {
+          "relationshipId": "ctx-other-fs"
+        },
+        {
+          "relationshipId": "ctx-client-fs"
+        }
+      ],
+      "legend": {
+        "title": "Diagram key",
+        "entries": [
+          {
+            "id": "person",
+            "label": "Person",
+            "description": "A human or a job run by a human",
+            "swatch": {
+              "shape": "person",
+              "tone": "default",
+              "stroke": "solid"
+            }
+          },
+          {
+            "id": "accent",
+            "label": "System in focus",
+            "description": "walflip, the scope of this view",
+            "swatch": {
+              "shape": "box",
+              "tone": "accent",
+              "stroke": "solid"
+            }
+          },
+          {
+            "id": "box",
+            "label": "Element",
+            "description": "A system, container, component or physical node in scope",
+            "swatch": {
+              "shape": "box",
+              "tone": "default",
+              "stroke": "solid"
+            }
+          },
+          {
+            "id": "external",
+            "label": "External or supporting element",
+            "description": "Outside the scope of this view",
+            "swatch": {
+              "shape": "box",
+              "tone": "external",
+              "stroke": "solid"
+            }
+          },
+          {
+            "id": "forward",
+            "label": "Relationship",
+            "description": "Arrow points from the caller to the supplier; the label gives intent and mechanism",
+            "swatch": {
+              "shape": "line",
+              "tone": "default",
+              "stroke": "solid",
+              "arrow": "forward"
+            }
+          }
+        ]
+      },
+      "layout": {
+        "mode": "auto",
+        "direction": "TB"
+      },
+      "docIds": [
+        "doc-context"
+      ],
+      "sourceIds": [
+        "src-readme"
+      ]
+    },
+    {
+      "id": "containers-runtime",
+      "kind": "container",
+      "title": "walflip: runtime containers and data stores",
+      "status": "existing",
+      "scopeId": "walflip",
+      "parent": {
+        "diagramId": "context",
+        "elementId": "walflip"
+      },
+      "related": [
+        {
+          "diagramId": "containers-verification",
+          "label": "Tests, fuzzing and tooling"
+        },
+        {
+          "diagramId": "deploy-dev",
+          "label": "Deployment on a developer machine"
+        }
+      ],
+      "groups": [
+        {
+          "id": "g-db-folder",
+          "label": "Per-database folder: ROOT/NAME/",
+          "memberIds": [
+            "live-db",
+            "live-wal",
+            "base-db",
+            "meta-db"
+          ],
+          "status": "existing"
+        }
+      ],
+      "nodes": [
+        {
+          "elementId": "operator"
+        },
+        {
+          "elementId": "cli"
+        },
+        {
+          "elementId": "lib",
+          "detail": {
+            "diagramId": "components"
+          }
+        },
+        {
+          "elementId": "live-db"
+        },
+        {
+          "elementId": "live-wal"
+        },
+        {
+          "elementId": "base-db"
+        },
+        {
+          "elementId": "meta-db"
+        },
+        {
+          "elementId": "clone-file"
+        },
+        {
+          "elementId": "other-writers"
+        },
+        {
+          "elementId": "sqlite-clients"
+        }
+      ],
+      "edges": [
+        {
+          "relationshipId": "op-cli"
+        },
+        {
+          "relationshipId": "cli-lib"
+        },
+        {
+          "relationshipId": "lib-live"
+        },
+        {
+          "relationshipId": "lib-wal"
+        },
+        {
+          "relationshipId": "lib-base"
+        },
+        {
+          "relationshipId": "lib-meta"
+        },
+        {
+          "relationshipId": "lib-clone"
+        },
+        {
+          "relationshipId": "live-appends-wal"
+        },
+        {
+          "relationshipId": "other-live"
+        },
+        {
+          "relationshipId": "client-clone"
+        }
+      ],
+      "legend": {
+        "title": "Diagram key",
+        "entries": [
+          {
+            "id": "person",
+            "label": "Person",
+            "description": "A human or a job run by a human",
+            "swatch": {
+              "shape": "person",
+              "tone": "default",
+              "stroke": "solid"
+            }
+          },
+          {
+            "id": "box",
+            "label": "Element",
+            "description": "A system, container, component or physical node in scope",
+            "swatch": {
+              "shape": "box",
+              "tone": "default",
+              "stroke": "solid"
+            }
+          },
+          {
+            "id": "database",
+            "label": "Data store",
+            "description": "A file that walflip reads or writes",
+            "swatch": {
+              "shape": "database",
+              "tone": "default",
+              "stroke": "solid"
+            }
+          },
+          {
+            "id": "external",
+            "label": "External or supporting element",
+            "description": "Outside the scope of this view",
+            "swatch": {
+              "shape": "box",
+              "tone": "external",
+              "stroke": "solid"
+            }
+          },
+          {
+            "id": "boundary",
+            "label": "Boundary",
+            "description": "A visual grouping, not a separate process",
+            "swatch": {
+              "shape": "boundary",
+              "tone": "default",
+              "stroke": "solid"
+            }
+          },
+          {
+            "id": "forward",
+            "label": "Relationship",
+            "description": "Arrow points from the caller to the supplier; the label gives intent and mechanism",
+            "swatch": {
+              "shape": "line",
+              "tone": "default",
+              "stroke": "solid",
+              "arrow": "forward"
+            }
+          }
+        ]
+      },
+      "layout": {
+        "mode": "auto",
+        "direction": "TB"
+      },
+      "docIds": [
+        "doc-containers-runtime"
+      ],
+      "sourceIds": [
+        "src-db",
+        "src-store"
+      ]
+    },
+    {
+      "id": "containers-verification",
+      "kind": "container",
+      "title": "walflip: tests, fuzzing and tooling",
+      "status": "existing",
+      "scopeId": "walflip",
+      "parent": {
+        "diagramId": "context",
+        "elementId": "walflip"
+      },
+      "related": [
+        {
+          "diagramId": "containers-runtime",
+          "label": "Runtime containers and data stores"
+        },
+        {
+          "diagramId": "deploy-ci",
+          "label": "Planned CI deployment"
+        }
+      ],
+      "nodes": [
+        {
+          "elementId": "ci-operator"
+        },
+        {
+          "elementId": "operator"
+        },
+        {
+          "elementId": "unit-tests"
+        },
+        {
+          "elementId": "roundtrip-tests"
+        },
+        {
+          "elementId": "cli-tests"
+        },
+        {
+          "elementId": "fuzz"
+        },
+        {
+          "elementId": "seed-script"
+        },
+        {
+          "elementId": "cli"
+        },
+        {
+          "elementId": "lib"
+        }
+      ],
+      "edges": [
+        {
+          "relationshipId": "ci-unit"
+        },
+        {
+          "relationshipId": "ci-roundtrip"
+        },
+        {
+          "relationshipId": "ci-cli-tests"
+        },
+        {
+          "relationshipId": "ci-fuzz"
+        },
+        {
+          "relationshipId": "op-seed"
+        },
+        {
+          "relationshipId": "unit-lib"
+        },
+        {
+          "relationshipId": "roundtrip-lib"
+        },
+        {
+          "relationshipId": "clitests-cli"
+        },
+        {
+          "relationshipId": "clitests-lib"
+        },
+        {
+          "relationshipId": "clitests-seed"
+        },
+        {
+          "relationshipId": "fuzz-lib"
+        },
+        {
+          "relationshipId": "seed-cli"
+        },
+        {
+          "relationshipId": "cli-lib"
+        }
+      ],
+      "legend": {
+        "title": "Diagram key",
+        "entries": [
+          {
+            "id": "person",
+            "label": "Person",
+            "description": "A human or a job run by a human",
+            "swatch": {
+              "shape": "person",
+              "tone": "default",
+              "stroke": "solid"
+            }
+          },
+          {
+            "id": "box",
+            "label": "Element",
+            "description": "A system, container, component or physical node in scope",
+            "swatch": {
+              "shape": "box",
+              "tone": "default",
+              "stroke": "solid"
+            }
+          },
+          {
+            "id": "dashed",
+            "label": "Planned or partly planned",
+            "description": "Not fully present in the code today; see the planned notes",
+            "swatch": {
+              "shape": "box",
+              "tone": "muted",
+              "stroke": "dashed"
+            }
+          },
+          {
+            "id": "forward",
+            "label": "Relationship",
+            "description": "Arrow points from the caller to the supplier; the label gives intent and mechanism",
+            "swatch": {
+              "shape": "line",
+              "tone": "default",
+              "stroke": "solid",
+              "arrow": "forward"
+            }
+          }
+        ]
+      },
+      "layout": {
+        "mode": "auto",
+        "direction": "TB"
+      },
+      "docIds": [
+        "doc-containers-verification"
+      ],
+      "sourceIds": [
+        "src-tests-cli",
+        "src-fuzz",
+        "src-plan"
+      ]
+    },
+    {
+      "id": "components",
+      "kind": "component",
+      "title": "walflip library: components",
+      "status": "existing",
+      "scopeId": "lib",
+      "parent": {
+        "diagramId": "containers-runtime",
+        "elementId": "lib"
+      },
+      "related": [
+        {
+          "diagramId": "dyn-create",
+          "label": "Dynamic: create --schema"
+        },
+        {
+          "diagramId": "dyn-exec",
+          "label": "Dynamic: exec"
+        },
+        {
+          "diagramId": "dyn-clone",
+          "label": "Dynamic: clone -n N"
+        },
+        {
+          "diagramId": "dyn-inspect",
+          "label": "Dynamic: list, status, log"
+        }
+      ],
+      "groups": [
+        {
+          "id": "g-io",
+          "label": "I/O shell: files and SQLite",
+          "memberIds": [
+            "c-db",
+            "c-store"
+          ],
+          "status": "existing"
+        },
+        {
+          "id": "g-pure",
+          "label": "Pure core: bytes in, values out, no I/O",
+          "memberIds": [
+            "c-wal",
+            "c-replay"
+          ],
+          "status": "existing"
+        }
+      ],
+      "nodes": [
+        {
+          "elementId": "operator"
+        },
+        {
+          "elementId": "c-main"
+        },
+        {
+          "elementId": "c-db"
+        },
+        {
+          "elementId": "c-store",
+          "detail": {
+            "diagramId": "code-store"
+          }
+        },
+        {
+          "elementId": "c-wal",
+          "detail": {
+            "diagramId": "code-wal"
+          }
+        },
+        {
+          "elementId": "c-replay"
+        },
+        {
+          "elementId": "sqlite-engine"
+        },
+        {
+          "elementId": "host-fs"
+        }
+      ],
+      "edges": [
+        {
+          "relationshipId": "op-main"
+        },
+        {
+          "relationshipId": "main-fs"
+        },
+        {
+          "relationshipId": "main-db"
+        },
+        {
+          "relationshipId": "db-store"
+        },
+        {
+          "relationshipId": "db-replay"
+        },
+        {
+          "relationshipId": "store-wal"
+        },
+        {
+          "relationshipId": "db-sqlite"
+        },
+        {
+          "relationshipId": "store-sqlite"
+        },
+        {
+          "relationshipId": "store-fs"
+        },
+        {
+          "relationshipId": "db-fs"
+        }
+      ],
+      "legend": {
+        "title": "Diagram key",
+        "entries": [
+          {
+            "id": "person",
+            "label": "Person",
+            "description": "A human or a job run by a human",
+            "swatch": {
+              "shape": "person",
+              "tone": "default",
+              "stroke": "solid"
+            }
+          },
+          {
+            "id": "box",
+            "label": "Element",
+            "description": "A system, container, component or physical node in scope",
+            "swatch": {
+              "shape": "box",
+              "tone": "default",
+              "stroke": "solid"
+            }
+          },
+          {
+            "id": "external",
+            "label": "External or supporting element",
+            "description": "Outside the scope of this view",
+            "swatch": {
+              "shape": "box",
+              "tone": "external",
+              "stroke": "solid"
+            }
+          },
+          {
+            "id": "boundary",
+            "label": "Boundary",
+            "description": "A visual grouping, not a separate process",
+            "swatch": {
+              "shape": "boundary",
+              "tone": "default",
+              "stroke": "solid"
+            }
+          },
+          {
+            "id": "forward",
+            "label": "Relationship",
+            "description": "Arrow points from the caller to the supplier; the label gives intent and mechanism",
+            "swatch": {
+              "shape": "line",
+              "tone": "default",
+              "stroke": "solid",
+              "arrow": "forward"
+            }
+          }
+        ]
+      },
+      "layout": {
+        "mode": "auto",
+        "direction": "TB"
+      },
+      "docIds": [
+        "doc-components",
+        "doc-decisions",
+        "doc-known-gaps"
+      ],
+      "sourceIds": [
+        "src-lib"
+      ]
+    },
+    {
+      "id": "code-wal",
+      "kind": "code",
+      "title": "wal: parser symbols",
+      "status": "existing",
+      "scopeId": "c-wal",
+      "parent": {
+        "diagramId": "components",
+        "elementId": "c-wal"
+      },
+      "nodes": [
+        {
+          "elementId": "k-wal-parse"
+        },
+        {
+          "elementId": "k-wal-checksum"
+        },
+        {
+          "elementId": "k-wal-wal"
+        },
+        {
+          "elementId": "k-wal-commit"
+        },
+        {
+          "elementId": "k-wal-frame"
+        },
+        {
+          "elementId": "k-wal-encode"
+        }
+      ],
+      "edges": [
+        {
+          "relationshipId": "k-parse-checksum"
+        },
+        {
+          "relationshipId": "k-parse-wal"
+        },
+        {
+          "relationshipId": "k-wal-commits"
+        },
+        {
+          "relationshipId": "k-commit-frames"
+        },
+        {
+          "relationshipId": "k-encode-checksum"
+        }
+      ],
+      "legend": {
+        "title": "Diagram key",
+        "entries": [
+          {
+            "id": "box",
+            "label": "Element",
+            "description": "A Rust symbol or a meta.db table",
+            "swatch": {
+              "shape": "box",
+              "tone": "default",
+              "stroke": "solid"
+            }
+          },
+          {
+            "id": "forward",
+            "label": "Relationship",
+            "description": "Arrow points from the caller to the supplier; the label gives intent and mechanism",
+            "swatch": {
+              "shape": "line",
+              "tone": "default",
+              "stroke": "solid",
+              "arrow": "forward"
+            }
+          }
+        ]
+      },
+      "layout": {
+        "mode": "auto",
+        "direction": "TB"
+      },
+      "docIds": [
+        "doc-wal-format"
+      ],
+      "sourceIds": [
+        "src-wal"
+      ]
+    },
+    {
+      "id": "code-store",
+      "kind": "code",
+      "title": "store: Store, cursor rule and meta.db schema",
+      "status": "existing",
+      "scopeId": "c-store",
+      "parent": {
+        "diagramId": "components",
+        "elementId": "c-store"
+      },
+      "nodes": [
+        {
+          "elementId": "k-store"
+        },
+        {
+          "elementId": "k-commits-seen"
+        },
+        {
+          "elementId": "k-t-meta"
+        },
+        {
+          "elementId": "k-t-commits"
+        },
+        {
+          "elementId": "k-t-frames"
+        }
+      ],
+      "edges": [
+        {
+          "relationshipId": "k-store-seen"
+        },
+        {
+          "relationshipId": "k-store-meta"
+        },
+        {
+          "relationshipId": "k-store-commits"
+        },
+        {
+          "relationshipId": "k-store-frames"
+        },
+        {
+          "relationshipId": "k-frames-commits"
+        }
+      ],
+      "legend": {
+        "title": "Diagram key",
+        "entries": [
+          {
+            "id": "box",
+            "label": "Element",
+            "description": "A Rust symbol or a meta.db table",
+            "swatch": {
+              "shape": "box",
+              "tone": "default",
+              "stroke": "solid"
+            }
+          },
+          {
+            "id": "forward",
+            "label": "Relationship",
+            "description": "Arrow points from the caller to the supplier; the label gives intent and mechanism",
+            "swatch": {
+              "shape": "line",
+              "tone": "default",
+              "stroke": "solid",
+              "arrow": "forward"
+            }
+          }
+        ]
+      },
+      "layout": {
+        "mode": "auto",
+        "direction": "TB"
+      },
+      "docIds": [
+        "doc-meta-schema"
+      ],
+      "sourceIds": [
+        "src-store"
+      ]
+    },
+    {
+      "id": "dyn-create",
+      "kind": "dynamic",
+      "title": "Dynamic: create NAME --schema FILE",
+      "status": "existing",
+      "parent": {
+        "diagramId": "components"
+      },
+      "nodes": [
+        {
+          "elementId": "operator"
+        },
+        {
+          "elementId": "c-main"
+        },
+        {
+          "elementId": "c-db"
+        },
+        {
+          "elementId": "c-store"
+        },
+        {
+          "elementId": "host-fs"
+        },
+        {
+          "elementId": "live-db"
+        },
+        {
+          "elementId": "base-db"
+        },
+        {
+          "elementId": "meta-db"
+        }
+      ],
+      "edges": [
+        {
+          "relationshipId": "op-main"
+        },
+        {
+          "relationshipId": "main-db"
+        },
+        {
+          "relationshipId": "main-fs"
+        },
+        {
+          "relationshipId": "db-fs"
+        },
+        {
+          "relationshipId": "db-live"
+        },
+        {
+          "relationshipId": "db-base"
+        },
+        {
+          "relationshipId": "db-store"
+        },
+        {
+          "relationshipId": "store-meta"
+        }
+      ],
+      "scenario": {
+        "kind": "sequence",
+        "id": "create",
+        "children": [
+          {
+            "kind": "interaction",
+            "id": "cr-1",
+            "relationshipId": "op-main",
+            "direction": "forward",
+            "label": "walflip create NAME --schema FILE"
+          },
+          {
+            "kind": "interaction",
+            "id": "cr-2",
+            "relationshipId": "main-db",
+            "direction": "forward",
+            "label": "Db::new: validate NAME (1-64 of A-Z a-z 0-9 _ -) and build paths"
+          },
+          {
+            "kind": "interaction",
+            "id": "cr-3",
+            "relationshipId": "main-fs",
+            "direction": "forward",
+            "label": "read_schema: read FILE, or stdin when FILE is -"
+          },
+          {
+            "kind": "interaction",
+            "id": "cr-4",
+            "relationshipId": "main-db",
+            "direction": "forward",
+            "label": "db::create(&d, Some(sql))"
+          },
+          {
+            "kind": "interaction",
+            "id": "cr-5",
+            "relationshipId": "db-fs",
+            "direction": "forward",
+            "label": "Fail if the folder exists; create_dir_all"
+          },
+          {
+            "kind": "interaction",
+            "id": "cr-6",
+            "relationshipId": "db-live",
+            "direction": "forward",
+            "label": "Open live.db; PRAGMA journal_mode=WAL; fail unless it returns wal"
+          },
+          {
+            "kind": "interaction",
+            "id": "cr-7",
+            "relationshipId": "db-live",
+            "direction": "forward",
+            "label": "execute_batch(schema); any error removes the whole folder"
+          },
+          {
+            "kind": "interaction",
+            "id": "cr-8",
+            "relationshipId": "db-live",
+            "direction": "forward",
+            "label": "PRAGMA wal_checkpoint(TRUNCATE); read PRAGMA page_size; close"
+          },
+          {
+            "kind": "interaction",
+            "id": "cr-9",
+            "relationshipId": "db-base",
+            "direction": "forward",
+            "label": "fs::copy live.db to base.db"
+          },
+          {
+            "kind": "interaction",
+            "id": "cr-10",
+            "relationshipId": "db-store",
+            "direction": "forward",
+            "label": "Store::open(meta.db); set page_size"
+          },
+          {
+            "kind": "interaction",
+            "id": "cr-11",
+            "relationshipId": "store-meta",
+            "direction": "forward",
+            "label": "CREATE TABLE IF NOT EXISTS meta, commits, frames; store page_size"
+          },
+          {
+            "kind": "interaction",
+            "id": "cr-12",
+            "relationshipId": "main-db",
+            "direction": "reverse",
+            "label": "Return Created { page_size }"
+          },
+          {
+            "kind": "interaction",
+            "id": "cr-13",
+            "relationshipId": "op-main",
+            "direction": "reverse",
+            "label": "Print: created DIR (page size N)"
+          }
+        ]
+      },
+      "legend": {
+        "title": "Diagram key",
+        "entries": [
+          {
+            "id": "person",
+            "label": "Person",
+            "description": "A human or a job run by a human",
+            "swatch": {
+              "shape": "person",
+              "tone": "default",
+              "stroke": "solid"
+            }
+          },
+          {
+            "id": "box",
+            "label": "Element",
+            "description": "A system, container, component or physical node in scope",
+            "swatch": {
+              "shape": "box",
+              "tone": "default",
+              "stroke": "solid"
+            }
+          },
+          {
+            "id": "database",
+            "label": "Data store",
+            "description": "A file that walflip reads or writes",
+            "swatch": {
+              "shape": "database",
+              "tone": "default",
+              "stroke": "solid"
+            }
+          },
+          {
+            "id": "external",
+            "label": "External or supporting element",
+            "description": "Outside the scope of this view",
+            "swatch": {
+              "shape": "box",
+              "tone": "external",
+              "stroke": "solid"
+            }
+          },
+          {
+            "id": "forward",
+            "label": "Relationship",
+            "description": "Arrow points from the caller to the supplier; the label gives intent and mechanism",
+            "swatch": {
+              "shape": "line",
+              "tone": "default",
+              "stroke": "solid",
+              "arrow": "forward"
+            }
+          },
+          {
+            "id": "scenario-id",
+            "label": "Scenario step number",
+            "description": "Tree position in the scenario; B marks branches with no order between them. Selected interactions are highlighted.",
+            "swatch": {
+              "shape": "line",
+              "tone": "accent",
+              "stroke": "solid",
+              "arrow": "forward"
+            }
+          }
+        ]
+      },
+      "layout": {
+        "mode": "auto",
+        "direction": "LR"
+      },
+      "docIds": [
+        "doc-dyn-create"
+      ],
+      "sourceIds": [
+        "src-main",
+        "src-db"
+      ]
+    },
+    {
+      "id": "dyn-exec",
+      "kind": "dynamic",
+      "title": "Dynamic: exec with WAL parse and idempotent capture",
+      "status": "existing",
+      "parent": {
+        "diagramId": "components"
+      },
+      "nodes": [
+        {
+          "elementId": "operator"
+        },
+        {
+          "elementId": "c-main"
+        },
+        {
+          "elementId": "c-db"
+        },
+        {
+          "elementId": "c-store"
+        },
+        {
+          "elementId": "c-wal"
+        },
+        {
+          "elementId": "live-db"
+        },
+        {
+          "elementId": "live-wal"
+        },
+        {
+          "elementId": "meta-db"
+        }
+      ],
+      "edges": [
+        {
+          "relationshipId": "op-main"
+        },
+        {
+          "relationshipId": "main-db"
+        },
+        {
+          "relationshipId": "db-store"
+        },
+        {
+          "relationshipId": "db-live"
+        },
+        {
+          "relationshipId": "live-appends-wal"
+        },
+        {
+          "relationshipId": "store-livewal"
+        },
+        {
+          "relationshipId": "store-wal"
+        },
+        {
+          "relationshipId": "store-meta"
+        }
+      ],
+      "scenario": {
+        "kind": "sequence",
+        "id": "exec",
+        "children": [
+          {
+            "kind": "interaction",
+            "id": "ex-1",
+            "relationshipId": "op-main",
+            "direction": "forward",
+            "label": "walflip --db NAME exec SQL, or exec - with one statement per line"
+          },
+          {
+            "kind": "interaction",
+            "id": "ex-2",
+            "relationshipId": "main-db",
+            "direction": "forward",
+            "label": "Db::existing: fail unless live.db exists; parse_statements for stdin"
+          },
+          {
+            "kind": "interaction",
+            "id": "ex-3",
+            "relationshipId": "main-db",
+            "direction": "forward",
+            "label": "db::exec(&d, &statements)"
+          },
+          {
+            "kind": "interaction",
+            "id": "ex-4",
+            "relationshipId": "db-store",
+            "direction": "forward",
+            "label": "Store::open(meta.db)"
+          },
+          {
+            "kind": "interaction",
+            "id": "ex-5",
+            "relationshipId": "db-live",
+            "direction": "forward",
+            "label": "Open live.db; PRAGMA wal_autocheckpoint=0"
+          },
+          {
+            "kind": "sequence",
+            "id": "ex-loop",
+            "children": [
+              {
+                "kind": "interaction",
+                "id": "ex-6",
+                "relationshipId": "db-live",
+                "direction": "forward",
+                "label": "For each statement: BEGIN; execute_batch(stmt); COMMIT"
+              },
+              {
+                "kind": "interaction",
+                "id": "ex-7",
+                "relationshipId": "live-appends-wal",
+                "direction": "forward",
+                "label": "SQLite appends frames; the last frame carries db_size (commit marker)"
+              },
+              {
+                "kind": "interaction",
+                "id": "ex-8",
+                "relationshipId": "db-store",
+                "direction": "forward",
+                "label": "capture(wal_path, label = stmt)"
+              },
+              {
+                "kind": "interaction",
+                "id": "ex-9",
+                "relationshipId": "store-livewal",
+                "direction": "forward",
+                "label": "fs::read the whole WAL; a missing file adds 0 commits"
+              },
+              {
+                "kind": "interaction",
+                "id": "ex-10",
+                "relationshipId": "store-wal",
+                "direction": "forward",
+                "label": "wal::parse(bytes)"
+              },
+              {
+                "kind": "interaction",
+                "id": "ex-11",
+                "relationshipId": "store-wal",
+                "direction": "reverse",
+                "label": "Wal { page_size, salt, commits }: stops at a salt or checksum mismatch, drops uncommitted tail"
+              },
+              {
+                "kind": "interaction",
+                "id": "ex-12",
+                "relationshipId": "store-meta",
+                "direction": "forward",
+                "label": "Read page_size, cursor_salt, cursor_commits, count(commits); fail if page sizes differ"
+              },
+              {
+                "kind": "interaction",
+                "id": "ex-13",
+                "relationshipId": "store-meta",
+                "direction": "forward",
+                "label": "One transaction: insert commits after the cursor and their frames; set cursor to salt and total"
+              },
+              {
+                "kind": "interaction",
+                "id": "ex-14",
+                "relationshipId": "db-store",
+                "direction": "reverse",
+                "label": "Return commits added = total - seen"
+              }
+            ]
+          },
+          {
+            "kind": "interaction",
+            "id": "ex-15",
+            "relationshipId": "main-db",
+            "direction": "reverse",
+            "label": "Return total captured"
+          },
+          {
+            "kind": "interaction",
+            "id": "ex-16",
+            "relationshipId": "op-main",
+            "direction": "reverse",
+            "label": "Print: captured N commit(s)"
+          }
+        ]
+      },
+      "legend": {
+        "title": "Diagram key",
+        "entries": [
+          {
+            "id": "person",
+            "label": "Person",
+            "description": "A human or a job run by a human",
+            "swatch": {
+              "shape": "person",
+              "tone": "default",
+              "stroke": "solid"
+            }
+          },
+          {
+            "id": "box",
+            "label": "Element",
+            "description": "A system, container, component or physical node in scope",
+            "swatch": {
+              "shape": "box",
+              "tone": "default",
+              "stroke": "solid"
+            }
+          },
+          {
+            "id": "database",
+            "label": "Data store",
+            "description": "A file that walflip reads or writes",
+            "swatch": {
+              "shape": "database",
+              "tone": "default",
+              "stroke": "solid"
+            }
+          },
+          {
+            "id": "external",
+            "label": "External or supporting element",
+            "description": "Outside the scope of this view",
+            "swatch": {
+              "shape": "box",
+              "tone": "external",
+              "stroke": "solid"
+            }
+          },
+          {
+            "id": "forward",
+            "label": "Relationship",
+            "description": "Arrow points from the caller to the supplier; the label gives intent and mechanism",
+            "swatch": {
+              "shape": "line",
+              "tone": "default",
+              "stroke": "solid",
+              "arrow": "forward"
+            }
+          },
+          {
+            "id": "scenario-id",
+            "label": "Scenario step number",
+            "description": "Tree position in the scenario; B marks branches with no order between them. Selected interactions are highlighted.",
+            "swatch": {
+              "shape": "line",
+              "tone": "accent",
+              "stroke": "solid",
+              "arrow": "forward"
+            }
+          }
+        ]
+      },
+      "layout": {
+        "mode": "auto",
+        "direction": "LR"
+      },
+      "docIds": [
+        "doc-dyn-exec"
+      ],
+      "sourceIds": [
+        "src-db",
+        "src-store",
+        "src-wal"
+      ]
+    },
+    {
+      "id": "dyn-clone",
+      "kind": "dynamic",
+      "title": "Dynamic: clone -n N with replay and db_pages resize",
+      "status": "existing",
+      "parent": {
+        "diagramId": "components"
+      },
+      "nodes": [
+        {
+          "elementId": "operator"
+        },
+        {
+          "elementId": "c-main"
+        },
+        {
+          "elementId": "c-db"
+        },
+        {
+          "elementId": "c-store"
+        },
+        {
+          "elementId": "c-replay"
+        },
+        {
+          "elementId": "meta-db"
+        },
+        {
+          "elementId": "base-db"
+        },
+        {
+          "elementId": "clone-file"
+        }
+      ],
+      "edges": [
+        {
+          "relationshipId": "op-main"
+        },
+        {
+          "relationshipId": "main-db"
+        },
+        {
+          "relationshipId": "db-clone"
+        },
+        {
+          "relationshipId": "db-store"
+        },
+        {
+          "relationshipId": "store-meta"
+        },
+        {
+          "relationshipId": "db-base"
+        },
+        {
+          "relationshipId": "db-replay"
+        }
+      ],
+      "scenario": {
+        "kind": "sequence",
+        "id": "clone",
+        "children": [
+          {
+            "kind": "interaction",
+            "id": "cl-1",
+            "relationshipId": "op-main",
+            "direction": "forward",
+            "label": "walflip --db NAME clone -n N -o FILE"
+          },
+          {
+            "kind": "interaction",
+            "id": "cl-2",
+            "relationshipId": "main-db",
+            "direction": "forward",
+            "label": "db::clone_at(&d, N, FILE)"
+          },
+          {
+            "kind": "interaction",
+            "id": "cl-3",
+            "relationshipId": "db-clone",
+            "direction": "forward",
+            "label": "Fail if FILE already exists"
+          },
+          {
+            "kind": "interaction",
+            "id": "cl-4",
+            "relationshipId": "db-store",
+            "direction": "forward",
+            "label": "Store::open; commit_count; fail if N > count; require page_size"
+          },
+          {
+            "kind": "interaction",
+            "id": "cl-5",
+            "relationshipId": "store-meta",
+            "direction": "forward",
+            "label": "SELECT pgno, page FROM frames WHERE commit_idx <= N ORDER BY commit_idx, seq"
+          },
+          {
+            "kind": "interaction",
+            "id": "cl-6",
+            "relationshipId": "store-meta",
+            "direction": "forward",
+            "label": "db_pages of commit N (none for N = 0) and max(db_pages) over 1..=N"
+          },
+          {
+            "kind": "interaction",
+            "id": "cl-7",
+            "relationshipId": "db-base",
+            "direction": "forward",
+            "label": "fs::read base.db into memory"
+          },
+          {
+            "kind": "interaction",
+            "id": "cl-8",
+            "relationshipId": "db-replay",
+            "direction": "forward",
+            "label": "apply(image, page_size, frames, db_pages, max_pages = max(base pages, max db_pages))"
+          },
+          {
+            "kind": "interaction",
+            "id": "cl-9",
+            "relationshipId": "db-replay",
+            "direction": "reverse",
+            "label": "Validate every frame first, overwrite at (pgno-1)*page_size, resize to db_pages"
+          },
+          {
+            "kind": "interaction",
+            "id": "cl-10",
+            "relationshipId": "db-clone",
+            "direction": "forward",
+            "label": "fs::write image to FILE"
+          },
+          {
+            "kind": "interaction",
+            "id": "cl-11",
+            "relationshipId": "main-db",
+            "direction": "forward",
+            "label": "db::summarize(FILE)"
+          },
+          {
+            "kind": "interaction",
+            "id": "cl-12",
+            "relationshipId": "db-clone",
+            "direction": "forward",
+            "label": "Open read-only immutable=1; integrity_check; count rows per table"
+          },
+          {
+            "kind": "interaction",
+            "id": "cl-13",
+            "relationshipId": "op-main",
+            "direction": "reverse",
+            "label": "Print frames replayed, integrity_check and row counts"
+          }
+        ]
+      },
+      "legend": {
+        "title": "Diagram key",
+        "entries": [
+          {
+            "id": "person",
+            "label": "Person",
+            "description": "A human or a job run by a human",
+            "swatch": {
+              "shape": "person",
+              "tone": "default",
+              "stroke": "solid"
+            }
+          },
+          {
+            "id": "box",
+            "label": "Element",
+            "description": "A system, container, component or physical node in scope",
+            "swatch": {
+              "shape": "box",
+              "tone": "default",
+              "stroke": "solid"
+            }
+          },
+          {
+            "id": "database",
+            "label": "Data store",
+            "description": "A file that walflip reads or writes",
+            "swatch": {
+              "shape": "database",
+              "tone": "default",
+              "stroke": "solid"
+            }
+          },
+          {
+            "id": "external",
+            "label": "External or supporting element",
+            "description": "Outside the scope of this view",
+            "swatch": {
+              "shape": "box",
+              "tone": "external",
+              "stroke": "solid"
+            }
+          },
+          {
+            "id": "forward",
+            "label": "Relationship",
+            "description": "Arrow points from the caller to the supplier; the label gives intent and mechanism",
+            "swatch": {
+              "shape": "line",
+              "tone": "default",
+              "stroke": "solid",
+              "arrow": "forward"
+            }
+          },
+          {
+            "id": "scenario-id",
+            "label": "Scenario step number",
+            "description": "Tree position in the scenario; B marks branches with no order between them. Selected interactions are highlighted.",
+            "swatch": {
+              "shape": "line",
+              "tone": "accent",
+              "stroke": "solid",
+              "arrow": "forward"
+            }
+          }
+        ]
+      },
+      "layout": {
+        "mode": "auto",
+        "direction": "LR"
+      },
+      "docIds": [
+        "doc-dyn-clone"
+      ],
+      "sourceIds": [
+        "src-db",
+        "src-replay"
+      ]
+    },
+    {
+      "id": "dyn-inspect",
+      "kind": "dynamic",
+      "title": "Dynamic: list, status and log",
+      "status": "existing",
+      "parent": {
+        "diagramId": "components"
+      },
+      "nodes": [
+        {
+          "elementId": "operator"
+        },
+        {
+          "elementId": "c-main"
+        },
+        {
+          "elementId": "c-db"
+        },
+        {
+          "elementId": "c-store"
+        },
+        {
+          "elementId": "meta-db"
+        },
+        {
+          "elementId": "live-wal"
+        },
+        {
+          "elementId": "host-fs"
+        }
+      ],
+      "edges": [
+        {
+          "relationshipId": "op-main"
+        },
+        {
+          "relationshipId": "main-db"
+        },
+        {
+          "relationshipId": "db-fs"
+        },
+        {
+          "relationshipId": "db-store"
+        },
+        {
+          "relationshipId": "store-meta"
+        },
+        {
+          "relationshipId": "db-livewal"
+        }
+      ],
+      "scenario": {
+        "kind": "parallel",
+        "id": "inspect",
+        "branches": [
+          {
+            "kind": "sequence",
+            "id": "ls",
+            "children": [
+              {
+                "kind": "interaction",
+                "id": "ls-1",
+                "relationshipId": "op-main",
+                "direction": "forward",
+                "label": "walflip list"
+              },
+              {
+                "kind": "interaction",
+                "id": "ls-2",
+                "relationshipId": "main-db",
+                "direction": "forward",
+                "label": "db::list(root)"
+              },
+              {
+                "kind": "interaction",
+                "id": "ls-3",
+                "relationshipId": "db-fs",
+                "direction": "forward",
+                "label": "read_dir(root); keep folders with live.db; missing root gives an empty list"
+              },
+              {
+                "kind": "interaction",
+                "id": "ls-4",
+                "relationshipId": "db-store",
+                "direction": "forward",
+                "label": "Store::open(NAME/meta.db).commit_count()"
+              },
+              {
+                "kind": "interaction",
+                "id": "ls-5",
+                "relationshipId": "store-meta",
+                "direction": "forward",
+                "label": "SELECT count(*) FROM commits"
+              },
+              {
+                "kind": "interaction",
+                "id": "ls-6",
+                "relationshipId": "op-main",
+                "direction": "reverse",
+                "label": "Print name and commits, sorted by name"
+              }
+            ]
+          },
+          {
+            "kind": "sequence",
+            "id": "st",
+            "children": [
+              {
+                "kind": "interaction",
+                "id": "st-1",
+                "relationshipId": "op-main",
+                "direction": "forward",
+                "label": "walflip --db NAME status"
+              },
+              {
+                "kind": "interaction",
+                "id": "st-2",
+                "relationshipId": "main-db",
+                "direction": "forward",
+                "label": "db::status(&d)"
+              },
+              {
+                "kind": "interaction",
+                "id": "st-3",
+                "relationshipId": "db-store",
+                "direction": "forward",
+                "label": "page_size, commit_count, count(frames)"
+              },
+              {
+                "kind": "interaction",
+                "id": "st-4",
+                "relationshipId": "store-meta",
+                "direction": "forward",
+                "label": "Read meta and count rows"
+              },
+              {
+                "kind": "interaction",
+                "id": "st-5",
+                "relationshipId": "db-livewal",
+                "direction": "forward",
+                "label": "fs::metadata(live.db-wal): size, or absent"
+              },
+              {
+                "kind": "interaction",
+                "id": "st-6",
+                "relationshipId": "op-main",
+                "direction": "reverse",
+                "label": "Print page size, commits, frames, live wal"
+              }
+            ]
+          },
+          {
+            "kind": "sequence",
+            "id": "lg",
+            "children": [
+              {
+                "kind": "interaction",
+                "id": "lg-1",
+                "relationshipId": "op-main",
+                "direction": "forward",
+                "label": "walflip --db NAME log --limit N (default 20)"
+              },
+              {
+                "kind": "interaction",
+                "id": "lg-2",
+                "relationshipId": "main-db",
+                "direction": "forward",
+                "label": "db::log(&d, N)"
+              },
+              {
+                "kind": "interaction",
+                "id": "lg-3",
+                "relationshipId": "db-store",
+                "direction": "forward",
+                "label": "Query through Store::conn()"
+              },
+              {
+                "kind": "interaction",
+                "id": "lg-4",
+                "relationshipId": "store-meta",
+                "direction": "forward",
+                "label": "commits LEFT JOIN frames GROUP BY idx ORDER BY idx LIMIT N"
+              },
+              {
+                "kind": "interaction",
+                "id": "lg-5",
+                "relationshipId": "op-main",
+                "direction": "reverse",
+                "label": "Print n, frames, db_pages and the first 90 characters of the SQL"
+              }
+            ]
+          }
+        ]
+      },
+      "legend": {
+        "title": "Diagram key",
+        "entries": [
+          {
+            "id": "person",
+            "label": "Person",
+            "description": "A human or a job run by a human",
+            "swatch": {
+              "shape": "person",
+              "tone": "default",
+              "stroke": "solid"
+            }
+          },
+          {
+            "id": "box",
+            "label": "Element",
+            "description": "A system, container, component or physical node in scope",
+            "swatch": {
+              "shape": "box",
+              "tone": "default",
+              "stroke": "solid"
+            }
+          },
+          {
+            "id": "database",
+            "label": "Data store",
+            "description": "A file that walflip reads or writes",
+            "swatch": {
+              "shape": "database",
+              "tone": "default",
+              "stroke": "solid"
+            }
+          },
+          {
+            "id": "external",
+            "label": "External or supporting element",
+            "description": "Outside the scope of this view",
+            "swatch": {
+              "shape": "box",
+              "tone": "external",
+              "stroke": "solid"
+            }
+          },
+          {
+            "id": "forward",
+            "label": "Relationship",
+            "description": "Arrow points from the caller to the supplier; the label gives intent and mechanism",
+            "swatch": {
+              "shape": "line",
+              "tone": "default",
+              "stroke": "solid",
+              "arrow": "forward"
+            }
+          },
+          {
+            "id": "scenario-id",
+            "label": "Scenario step number",
+            "description": "Tree position in the scenario; B marks branches with no order between them. Selected interactions are highlighted.",
+            "swatch": {
+              "shape": "line",
+              "tone": "accent",
+              "stroke": "solid",
+              "arrow": "forward"
+            }
+          }
+        ]
+      },
+      "layout": {
+        "mode": "auto",
+        "direction": "LR"
+      },
+      "docIds": [
+        "doc-dyn-inspect"
+      ],
+      "sourceIds": [
+        "src-db"
+      ]
+    },
+    {
+      "id": "deploy-dev",
+      "kind": "deployment",
+      "title": "Deployment: developer machine",
+      "status": "existing",
+      "environment": "developer-machine",
+      "parent": {
+        "diagramId": "containers-runtime"
+      },
+      "related": [
+        {
+          "diagramId": "deploy-ci",
+          "label": "Planned CI deployment"
+        }
+      ],
+      "nodes": [
+        {
+          "elementId": "dn-host"
+        },
+        {
+          "elementId": "dn-cargo-bin"
+        },
+        {
+          "elementId": "i-cli-installed"
+        },
+        {
+          "elementId": "dn-target"
+        },
+        {
+          "elementId": "i-cli-release"
+        },
+        {
+          "elementId": "infra-make"
+        },
+        {
+          "elementId": "dn-data-root"
+        },
+        {
+          "elementId": "dn-db-folder"
+        },
+        {
+          "elementId": "i-live-db"
+        },
+        {
+          "elementId": "i-live-wal"
+        },
+        {
+          "elementId": "i-base-db"
+        },
+        {
+          "elementId": "i-meta-db"
+        },
+        {
+          "elementId": "dn-tmp"
+        },
+        {
+          "elementId": "i-clone"
+        },
+        {
+          "elementId": "dn-nightly"
+        },
+        {
+          "elementId": "i-fuzz"
+        }
+      ],
+      "edges": [
+        {
+          "relationshipId": "d-make-cli"
+        },
+        {
+          "relationshipId": "d-make-fuzz"
+        },
+        {
+          "relationshipId": "d-cli-live"
+        },
+        {
+          "relationshipId": "d-cli-wal"
+        },
+        {
+          "relationshipId": "d-cli-base"
+        },
+        {
+          "relationshipId": "d-cli-meta"
+        },
+        {
+          "relationshipId": "d-cli-clone"
+        },
+        {
+          "relationshipId": "d-installed-live"
+        }
+      ],
+      "legend": {
+        "title": "Diagram key",
+        "entries": [
+          {
+            "id": "box",
+            "label": "Element",
+            "description": "A system, container, component or physical node in scope",
+            "swatch": {
+              "shape": "box",
+              "tone": "default",
+              "stroke": "solid"
+            }
+          },
+          {
+            "id": "boundary",
+            "label": "Boundary",
+            "description": "A physical node such as a machine or directory",
+            "swatch": {
+              "shape": "boundary",
+              "tone": "default",
+              "stroke": "solid"
+            }
+          },
+          {
+            "id": "forward",
+            "label": "Relationship",
+            "description": "Arrow points from the caller to the supplier; the label gives intent and mechanism",
+            "swatch": {
+              "shape": "line",
+              "tone": "default",
+              "stroke": "solid",
+              "arrow": "forward"
+            }
+          }
+        ]
+      },
+      "layout": {
+        "mode": "auto",
+        "direction": "TB"
+      },
+      "docIds": [
+        "doc-deploy-dev"
+      ],
+      "sourceIds": [
+        "src-make",
+        "src-readme"
+      ]
+    },
+    {
+      "id": "deploy-ci",
+      "kind": "deployment",
+      "title": "Deployment: CI (planned)",
+      "status": "planned",
+      "environment": "ci-planned",
+      "parent": {
+        "diagramId": "containers-verification"
+      },
+      "nodes": [
+        {
+          "elementId": "dn-ci"
+        },
+        {
+          "elementId": "infra-ci-schedule"
+        },
+        {
+          "elementId": "i-ci-fuzz"
+        },
+        {
+          "elementId": "i-ci-tests"
+        }
+      ],
+      "edges": [
+        {
+          "relationshipId": "d-ci-fuzz"
+        },
+        {
+          "relationshipId": "d-ci-tests"
+        }
+      ],
+      "legend": {
+        "title": "Diagram key",
+        "entries": [
+          {
+            "id": "box",
+            "label": "Element",
+            "description": "A system, container, component or physical node in scope",
+            "swatch": {
+              "shape": "box",
+              "tone": "default",
+              "stroke": "solid"
+            }
+          },
+          {
+            "id": "boundary",
+            "label": "Boundary",
+            "description": "A physical node such as a machine or directory",
+            "swatch": {
+              "shape": "boundary",
+              "tone": "default",
+              "stroke": "solid"
+            }
+          },
+          {
+            "id": "dashed",
+            "label": "Planned or partly planned",
+            "description": "Not fully present in the code today; see the planned notes",
+            "swatch": {
+              "shape": "box",
+              "tone": "muted",
+              "stroke": "dashed"
+            }
+          },
+          {
+            "id": "forward",
+            "label": "Relationship",
+            "description": "Arrow points from the caller to the supplier; the label gives intent and mechanism",
+            "swatch": {
+              "shape": "line",
+              "tone": "default",
+              "stroke": "solid",
+              "arrow": "forward"
+            }
+          }
+        ]
+      },
+      "layout": {
+        "mode": "auto",
+        "direction": "TB"
+      },
+      "docIds": [
+        "doc-deploy-ci"
+      ],
+      "sourceIds": [
+        "src-plan"
+      ]
+    }
+  ],
+  "documents": [
+    {
+      "id": "doc-context",
+      "title": "System context",
+      "plain": "walflip is a local command-line tool. It has no server and no background process; each command is one OS process and all state lives under the data root.\n\nThe operator runs every write through `walflip exec`. A CI job or fuzzer operator is a secondary consumer that runs the test suites and the WAL fuzzer.\n\nOther programs that open `live.db` are **not supported**: their writes are not captured, and a checkpoint they cause can discard WAL frames before walflip reads them (README, Limitations).",
+      "ste": {
+        "text": "walflip is a local command-line tool. Each command is one process. All data is in the data root.\n\nThe operator must send all writes through walflip exec. Other programs must not write live.db. If they write it, walflip does not record the change.",
+        "issue": "ASD-STE100 Issue 9",
+        "reviewStatus": "draft"
+      },
+      "termIds": [],
+      "sourceIds": [
+        "src-readme"
+      ]
+    },
+    {
+      "id": "doc-operator",
+      "title": "Operator",
+      "plain": "Selects a database with `--db NAME` or `WALFLIP_DB`, and a data root with `--root DIR` or `WALFLIP_ROOT` (default `walflip-data`, relative to the working directory).",
+      "ste": {
+        "text": "Use --db or WALFLIP_DB to select the database. Use --root or WALFLIP_ROOT to select the data root.",
+        "issue": "ASD-STE100 Issue 9",
+        "reviewStatus": "draft"
+      },
+      "termIds": [],
+      "sourceIds": [
+        "src-main"
+      ]
+    },
+    {
+      "id": "doc-cli",
+      "title": "CLI binary",
+      "plain": "Subcommands: `create NAME [--schema FILE|-]`, `list`, `rename OLD NEW`, `drop NAME`, `exec SQL|-`, `log [--limit N]`, `status`, `clone -n N -o FILE`. Each arm of the `match` in `main` calls one `walflip::db` function and prints its result. After `clone`, `report` calls `db::summarize` and prints `integrity_check` and row counts.",
+      "ste": {
+        "text": "The CLI reads the arguments. It calls one library function for each command. It prints the result. It does not contain logic.",
+        "issue": "ASD-STE100 Issue 9",
+        "reviewStatus": "draft"
+      },
+      "termIds": [],
+      "sourceIds": [
+        "src-main"
+      ]
+    },
+    {
+      "id": "doc-containers-runtime",
+      "title": "Runtime containers and data stores",
+      "plain": "Two code containers (the binary and the library crate) and five data stores. Four stores live in one folder per database, `ROOT/NAME/`: `live.db`, `live.db-wal`, `base.db` and `meta.db`. The fifth is the clone file at the `-o` path.\n\n`live.db-wal` is owned by SQLite. walflip only reads it, as raw bytes, from inside `exec`.",
+      "ste": {
+        "text": "The binary calls the library. The library reads and writes five files. Four files are in the database folder. The fifth file is the clone.\n\nSQLite writes live.db-wal. walflip only reads it.",
+        "issue": "ASD-STE100 Issue 9",
+        "reviewStatus": "draft"
+      },
+      "termIds": [],
+      "sourceIds": [
+        "src-db",
+        "src-store"
+      ]
+    },
+    {
+      "id": "doc-containers-verification",
+      "title": "Tests, fuzzing and tooling",
+      "plain": "Each suite is a separately runnable target. In-crate `#[cfg(test)]` modules test internals. `tests/roundtrip.rs` links the library and compares clones with live contents. `tests/cli.rs` spawns the compiled binary through `tests/common::Harness`, uses a shadow-SQLite `Model` as oracle and checks the invariant catalog through the library. The fuzz crate depends on walflip with feature `testing` and calls only `wal::parse`. `scripts/seed.sh` drives the binary to build the 500-commit demo; `tests/cli.rs` also runs it.\n\nNo CI workflow exists in the repo. Planned fuzz targets and CI jobs are described in [TESTING_PLAN.md](https://github.com/nickstrad/walflip/blob/main/docs/TESTING_PLAN.md) sections 2.1 and 2.4.",
+      "ste": {
+        "text": "Each test suite runs separately. The fuzz crate sends random bytes to wal::parse. The seed script runs the binary to make a demo database.\n\nThe repository has no CI file. The testing plan gives the CI jobs that are planned.",
+        "issue": "ASD-STE100 Issue 9",
+        "reviewStatus": "draft"
+      },
+      "termIds": [],
+      "sourceIds": [
+        "src-tests-cli",
+        "src-tests-roundtrip",
+        "src-fuzz",
+        "src-seed",
+        "src-plan"
+      ]
+    },
+    {
+      "id": "doc-components",
+      "title": "Library components and the pure/I-O boundary",
+      "plain": "Dependencies point one way: `main.rs` -> `db` -> `store` -> `wal`, and `db` -> `replay`. `wal` and `replay` import only `anyhow`; they take bytes or slices and return values. `store` and `db` own all file and SQLite I/O. `store::commits_seen` is a pure function inside the I/O module so the cursor rule can be property-tested alone.\n\n`main.rs` is shown as a supporting component of the CLI container. Tests and the fuzz crate also call the library directly (see the verification container view).\n\nNote: the doc comment in `src/lib.rs` still lists a `schema` module as pure. That module no longer exists; the doc comment is stale.",
+      "ste": {
+        "text": "Dependencies go in one direction: main.rs, then db, then store, then wal. db also uses replay.\n\nwal and replay do not read or write files. store and db do all file and SQLite operations.",
+        "issue": "ASD-STE100 Issue 9",
+        "reviewStatus": "draft"
+      },
+      "termIds": [],
+      "sourceIds": [
+        "src-lib",
+        "src-db",
+        "src-store",
+        "src-wal",
+        "src-replay"
+      ]
+    },
+    {
+      "id": "doc-c-db",
+      "title": "db module",
+      "plain": "Names must be 1-64 characters of ASCII letters, digits, `_` or `-`, because they become folder names. `parse_statements` splits stdin into one statement per non-blank line. Every function returns a plain struct (`Created`, `DbSummary`, `LogEntry`, `Status`, `Summary`) or a count.",
+      "ste": {
+        "text": "A database name must have 1 to 64 letters, digits, underscores or hyphens. The name becomes a folder name. Each function returns data. It does not print.",
+        "issue": "ASD-STE100 Issue 9",
+        "reviewStatus": "draft"
+      },
+      "termIds": [],
+      "sourceIds": [
+        "src-db"
+      ]
+    },
+    {
+      "id": "doc-decisions",
+      "title": "Architecture decisions and constraints",
+      "plain": "- **Parse the WAL file directly instead of using SQLite hooks.** `store::capture` reads `live.db-wal` with `fs::read` and `wal::parse` validates magic, page size, salts and the chained checksum. Commits are frames up to one with non-zero `db_size`.\n- **Full-page replay.** Every WAL frame is a whole page, so `replay::apply` is positioned overwrites at `(pgno - 1) * page_size` on a copy of `base.db`, then a resize to commit N's `db_pages`. No SQL runs during replay.\n- **Library returns data, CLI prints.** `db` returns structs; `main.rs` only formats output. Tests call the library directly.\n- **Capture runs inside exec with autocheckpoint disabled.** `db::exec` sets `PRAGMA wal_autocheckpoint=0` and calls `capture` after every commit on the same open connection, so SQLite cannot fold frames into `live.db` before they are read.\n- **Cursor = salts + commit count.** `meta.cursor_salt` and `meta.cursor_commits` record the WAL generation and how many of its commits are stored. A new salt (WAL restarted after a checkpoint) resets the count to 0, so re-reading the same WAL adds nothing.\n- **page_size pinned at create.** `create` stores `PRAGMA page_size` in `meta`; `capture` rejects a WAL with a different page size because replay offsets depend on it.\n- **Replay allocation bound.** `clone_at` passes `max_pages = max(base pages, max db_pages over 1..=N)`; `apply` rejects any frame or size above it before changing the image.\n- **One statement = one transaction = at most one commit.** A statement that changes nothing writes no frames and adds no commit.",
+      "ste": {
+        "text": "- walflip reads the WAL file directly. It does not use SQLite hooks.\n- Each WAL frame is a full page. Replay writes each page at its offset. Replay does not run SQL.\n- The library returns data. The CLI prints the data.\n- exec stops automatic checkpoints. exec reads the WAL after each commit.\n- The cursor is the WAL salts and the number of commits. A new salt sets the number to 0.\n- create records the page size. capture stops with an error if the WAL page size is different.",
+        "issue": "ASD-STE100 Issue 9",
+        "reviewStatus": "draft"
+      },
+      "termIds": [],
+      "sourceIds": [
+        "src-store",
+        "src-wal",
+        "src-replay",
+        "src-db",
+        "src-main"
+      ]
+    },
+    {
+      "id": "doc-known-gaps",
+      "title": "Known gaps (reported by TESTING_PLAN.md, not re-verified)",
+      "plain": "These defects are **reported by** [docs/TESTING_PLAN.md](https://github.com/nickstrad/walflip/blob/main/docs/TESTING_PLAN.md). They were not re-run for this documentation.\n\n- **B1** (medium): `summarize` does not double `\"` in table names, so `clone` writes the file and then fails on a name such as `a\"b`. Affects the clone report step.\n- **B2** (high): a statement that contains `COMMIT` commits to `live.db`, then `tx.commit()` fails and capture never runs; the WAL is checkpointed on close and history is lost. Affects the exec loop.\n- **B3** (medium): commits already in `live.db-wal` when `exec` starts (crashed or external writer) are captured under the next statement's label.\n- **B4** (high): concurrent `exec` on one database fails with `UNIQUE constraint failed: commits.idx` and records extra commits; the cursor is read outside the `meta.db` transaction.\n- **B5** (high): a schema with `PRAGMA journal_mode=DELETE` is accepted; afterwards every `exec` captures 0 commits.\n- **B6** (medium): `replay::apply` could be forced into a huge allocation by a large `pgno` or `db_pages`. Observation: the current code has a `max_pages` parameter and a test `huge_pgno_is_rejected_without_allocating`, so this looks addressed, but the plan still lists it.\n- **B7** (low/UX): `PRAGMA page_size` and `PRAGMA auto_vacuum` in a schema are silently ignored because WAL mode is enabled first; `create` reports 4096.\n- **B8** (low): an unterminated `BEGIN` in a schema fails with `database table is locked` instead of an \"applying schema\" message.",
+      "ste": {
+        "text": "The testing plan reports these defects. We did not test them again.\n\n- B1: Table names with a quote character cause the clone report to fail.\n- B2: A statement with COMMIT can cause a loss of history.\n- B3: Old commits in the WAL get the label of the next statement.\n- B4: Two exec processes at the same time can corrupt the history.\n- B5: A schema can turn off WAL mode. Then exec records no commits.\n- B6: A large page number could cause a very large allocation. The current code has a limit for this.\n- B7: create ignores page_size and auto_vacuum in the schema.\n- B8: An open BEGIN in the schema gives an unclear error.",
+        "issue": "ASD-STE100 Issue 9",
+        "reviewStatus": "draft"
+      },
+      "termIds": [],
+      "sourceIds": [
+        "src-plan"
+      ]
+    },
+    {
+      "id": "doc-wal-format",
+      "title": "WAL file format as parsed by wal::parse",
+      "plain": "All header integers are big-endian u32. The magic only selects the byte order of the checksum words.\n\n**Header, 32 bytes:** 0 magic (`0x377f0682` little-endian checksums, `0x377f0683` big-endian); 4 format version (not checked; encoder writes 3007000); 8 page size (must be a power of two and at least 512); 12 checkpoint sequence (not checked); 16 salt-1; 20 salt-2; 24 checksum-1; 28 checksum-2 (over bytes 0-23).\n\n**Frame, 24 + page_size bytes:** 0 page number; 4 db size in pages if this is a commit frame, else 0; 8 salt-1; 12 salt-2; 16 checksum-1; 20 checksum-2; 24 page image. The checksum covers frame bytes 0-7 then the page, chained from the previous frame (or the header).\n\n**Outcomes:** buffer shorter than 32 bytes or bad header checksum gives `Ok(None)`; bad magic or page size gives `Err`; the frame loop stops at the first salt mismatch (older generation), checksum mismatch or partial frame; frames after the last commit frame are dropped.",
+      "ste": {
+        "text": "The header has 32 bytes. It has the magic number, the page size, two salts and a checksum.\n\nEach frame has a 24-byte header and one page. The frame header has the page number, the database size, the salts and a checksum.\n\nA frame with a database size that is not zero ends a commit. The parser stops at the first bad salt or bad checksum.",
+        "issue": "ASD-STE100 Issue 9",
+        "reviewStatus": "draft"
+      },
+      "termIds": [],
+      "sourceIds": [
+        "src-wal"
+      ]
+    },
+    {
+      "id": "doc-meta-schema",
+      "title": "meta.db schema",
+      "plain": "- `meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)`: keys `page_size`, `cursor_salt` (`salt1:salt2`), `cursor_commits`.\n- `commits(idx INTEGER PRIMARY KEY, label TEXT NOT NULL, db_pages INTEGER NOT NULL, committed_at TEXT DEFAULT CURRENT_TIMESTAMP)`: `idx` is 1-based; `label` is the SQL statement.\n- `frames(commit_idx INTEGER NOT NULL REFERENCES commits(idx), seq INTEGER NOT NULL, pgno INTEGER NOT NULL, page BLOB NOT NULL, PRIMARY KEY(commit_idx, seq))`.\n\n`Store::open` runs `CREATE TABLE IF NOT EXISTS` on every open, so `list`, `status` and `log` create an empty `meta.db` if it is missing. Each `capture` writes its commits, frames and cursor in one transaction.",
+      "ste": {
+        "text": "meta.db has three tables: meta, commits and frames. meta keeps the page size and the cursor. commits has one row for each commit. frames keeps the page images.\n\nEach capture writes all rows in one transaction.",
+        "issue": "ASD-STE100 Issue 9",
+        "reviewStatus": "draft"
+      },
+      "termIds": [],
+      "sourceIds": [
+        "src-store"
+      ]
+    },
+    {
+      "id": "doc-dyn-create",
+      "title": "create --schema",
+      "plain": "The name is validated before the schema file is read. WAL mode is switched on **before** the schema runs, then the WAL is checkpointed with `TRUNCATE` so `base.db` is a complete, WAL-free copy. If any step in `init_files` fails, `create` removes the whole folder.\n\nFailure cases: folder already exists; schema SQL error (folder removed). Reported gaps: B5 (schema can switch journal mode away from WAL), B7 (`page_size`/`auto_vacuum` in the schema ignored), B8 (unterminated `BEGIN` gives a locking error).",
+      "ste": {
+        "text": "create checks the name first. Then it reads the schema. It sets WAL mode before it runs the schema. Then it copies live.db to base.db. If a step fails, create removes the folder.",
+        "issue": "ASD-STE100 Issue 9",
+        "reviewStatus": "draft"
+      },
+      "termIds": [],
+      "sourceIds": [
+        "src-db",
+        "src-main",
+        "src-plan"
+      ]
+    },
+    {
+      "id": "doc-dyn-exec",
+      "title": "exec: WAL parse and idempotent capture",
+      "plain": "Invariant: capture runs on the same open connection, after each commit, with automatic checkpointing off, so every committed frame is still in the WAL when it is read.\n\nThe cursor makes capture idempotent: `seen = commits_seen(cursor_salt, cursor_commits, wal.salt)`; only commits after `seen` are inserted, and the cursor is set to the WAL's total. When `exec` returns the connection closes; SQLite then normally checkpoints and removes the WAL, and the next `exec` starts a new generation with new salts, so the count restarts at 0.\n\nFailure cases: `--db` missing or unknown; SQL error (earlier statements stay committed and captured); WAL page size differs from `meta.page_size`. Reported gaps: B2 (`COMMIT` inside a statement), B3 (pre-existing WAL commits mislabelled), B4 (concurrent exec; cursor read outside the transaction).",
+      "ste": {
+        "text": "exec stops automatic checkpoints. After each commit, exec reads the WAL and records the new commits. The cursor tells which commits are already recorded. Thus a second read adds nothing.\n\nDo not run two exec commands on one database at the same time.",
+        "issue": "ASD-STE100 Issue 9",
+        "reviewStatus": "draft"
+      },
+      "termIds": [],
+      "sourceIds": [
+        "src-db",
+        "src-store",
+        "src-wal",
+        "src-plan"
+      ]
+    },
+    {
+      "id": "doc-dyn-clone",
+      "title": "clone -n N: replay and db_pages resize",
+      "plain": "`clone_at` loads frames of commits 1..=N in `(commit_idx, seq)` order, so later writes to a page win. `replay::apply` validates every frame before changing anything (page 0, page above `max_pages`, wrong length, `db_pages` above `max_pages` all give `Err`). After the overwrites it resizes the image to commit N's `db_pages`, which shrinks it when a later commit freed pages (for example after `DROP TABLE` with `auto_vacuum`). For N = 0 no frames apply and the result is `base.db`.\n\nThe image is built in memory, so clone needs RAM roughly the size of the database. Failure cases: output exists; N greater than the commit count; no recorded page size. Reported gap: B1 (table names containing `\"` break the report after the file is written).",
+      "ste": {
+        "text": "clone reads base.db into memory. It writes each stored page at its offset, in commit order. Then it sets the size to the size of commit N. Then it writes the file and checks it.",
+        "issue": "ASD-STE100 Issue 9",
+        "reviewStatus": "draft"
+      },
+      "termIds": [],
+      "sourceIds": [
+        "src-db",
+        "src-replay",
+        "src-plan"
+      ]
+    },
+    {
+      "id": "doc-dyn-inspect",
+      "title": "list, status and log",
+      "plain": "These three commands are independent; the scenario shows them as unordered branches. All are read-only on history, but `Store::open` runs `CREATE TABLE IF NOT EXISTS`, so it creates `meta.db` if it is missing. `status` reports `live wal: absent (checkpointed)` when `live.db-wal` does not exist, which is the normal state between commands.",
+      "ste": {
+        "text": "list, status and log only read the history. status shows if live.db-wal exists. Usually it does not exist between commands.",
+        "issue": "ASD-STE100 Issue 9",
+        "reviewStatus": "draft"
+      },
+      "termIds": [],
+      "sourceIds": [
+        "src-db",
+        "src-main"
+      ]
+    },
+    {
+      "id": "doc-deploy-dev",
+      "title": "Deployment: developer machine",
+      "plain": "Install with `cargo install --path .` (Rust 1.75+, Unix-like OS; SQLite is bundled). Make targets: `make build` (`cargo build --release`), `make test` (`cargo test`), `make fuzz` (`cargo +nightly fuzz run wal_parse -- -max_total_time=$(FUZZ_SECS)`, default 30 s, needs nightly and cargo-fuzz), `make seed` (build, then `scripts/seed.sh` with `WALFLIP=target/release/walflip`), `make demo` (seed, then clone at 250 and 500 into `/tmp`), `make clean`, `make distclean`.\n\nThe data root defaults to `walflip-data/` in the working directory, so the installed binary and the release binary share data only when run from the same directory.",
+      "ste": {
+        "text": "Install walflip with cargo install. Use make build, make test, make fuzz, make seed and make demo. make fuzz needs the nightly Rust toolchain and cargo-fuzz.",
+        "issue": "ASD-STE100 Issue 9",
+        "reviewStatus": "draft"
+      },
+      "termIds": [],
+      "sourceIds": [
+        "src-make",
+        "src-readme",
+        "src-seed"
+      ]
+    },
+    {
+      "id": "doc-deploy-ci",
+      "title": "Deployment: CI (planned)",
+      "plain": "Not implemented. [TESTING_PLAN.md](https://github.com/nickstrad/walflip/blob/main/docs/TESTING_PLAN.md) section 2.4 plans a nightly job (each fuzz target for 300 s with `-rss_limit_mb=1024` and a dictionary) and a PR job (`cargo +nightly fuzz build` plus corpus replay with `-runs=0`).",
+      "ste": {
+        "text": "This deployment is planned. It does not exist now.",
+        "issue": "ASD-STE100 Issue 9",
+        "reviewStatus": "draft"
+      },
+      "termIds": [],
+      "sourceIds": [
+        "src-plan"
+      ]
+    }
+  ],
+  "sources": [
+    {
+      "id": "src-readme",
+      "title": "walflip README",
+      "url": "https://github.com/nickstrad/walflip/blob/main/README.md",
+      "path": "README.md",
+      "notes": "Read from the local checkout on 2026-10-14. The GitHub URL assumes the repository is pushed to main."
+    },
+    {
+      "id": "src-cargo",
+      "title": "Cargo manifest",
+      "url": "https://github.com/nickstrad/walflip/blob/main/Cargo.toml",
+      "path": "Cargo.toml",
+      "notes": "Read from the local checkout on 2026-10-14. The GitHub URL assumes the repository is pushed to main."
+    },
+    {
+      "id": "src-lib",
+      "title": "Library root",
+      "url": "https://github.com/nickstrad/walflip/blob/main/src/lib.rs",
+      "path": "src/lib.rs",
+      "notes": "Read from the local checkout on 2026-10-14. The GitHub URL assumes the repository is pushed to main."
+    },
+    {
+      "id": "src-main",
+      "title": "CLI entry point",
+      "url": "https://github.com/nickstrad/walflip/blob/main/src/main.rs",
+      "path": "src/main.rs",
+      "notes": "Read from the local checkout on 2026-10-14. The GitHub URL assumes the repository is pushed to main."
+    },
+    {
+      "id": "src-db",
+      "title": "Database operations",
+      "url": "https://github.com/nickstrad/walflip/blob/main/src/db.rs",
+      "path": "src/db.rs",
+      "notes": "Read from the local checkout on 2026-10-14. The GitHub URL assumes the repository is pushed to main."
+    },
+    {
+      "id": "src-wal",
+      "title": "WAL parser and reference encoder",
+      "url": "https://github.com/nickstrad/walflip/blob/main/src/wal.rs",
+      "path": "src/wal.rs",
+      "notes": "Read from the local checkout on 2026-10-14. The GitHub URL assumes the repository is pushed to main."
+    },
+    {
+      "id": "src-replay",
+      "title": "Page replay",
+      "url": "https://github.com/nickstrad/walflip/blob/main/src/replay.rs",
+      "path": "src/replay.rs",
+      "notes": "Read from the local checkout on 2026-10-14. The GitHub URL assumes the repository is pushed to main."
+    },
+    {
+      "id": "src-store",
+      "title": "meta.db store and capture cursor",
+      "url": "https://github.com/nickstrad/walflip/blob/main/src/store.rs",
+      "path": "src/store.rs",
+      "notes": "Read from the local checkout on 2026-10-14. The GitHub URL assumes the repository is pushed to main."
+    },
+    {
+      "id": "src-tests-common",
+      "title": "E2E harness",
+      "url": "https://github.com/nickstrad/walflip/blob/main/tests/common/mod.rs",
+      "path": "tests/common/mod.rs",
+      "notes": "Read from the local checkout on 2026-10-14. The GitHub URL assumes the repository is pushed to main."
+    },
+    {
+      "id": "src-tests-invariants",
+      "title": "Invariant checks",
+      "url": "https://github.com/nickstrad/walflip/blob/main/tests/common/invariants.rs",
+      "path": "tests/common/invariants.rs",
+      "notes": "Read from the local checkout on 2026-10-14. The GitHub URL assumes the repository is pushed to main."
+    },
+    {
+      "id": "src-tests-model",
+      "title": "Shadow-database oracle",
+      "url": "https://github.com/nickstrad/walflip/blob/main/tests/common/model.rs",
+      "path": "tests/common/model.rs",
+      "notes": "Read from the local checkout on 2026-10-14. The GitHub URL assumes the repository is pushed to main."
+    },
+    {
+      "id": "src-tests-cli",
+      "title": "End-to-end scenarios",
+      "url": "https://github.com/nickstrad/walflip/blob/main/tests/cli.rs",
+      "path": "tests/cli.rs",
+      "notes": "Read from the local checkout on 2026-10-14. The GitHub URL assumes the repository is pushed to main."
+    },
+    {
+      "id": "src-tests-roundtrip",
+      "title": "Round-trip property tests",
+      "url": "https://github.com/nickstrad/walflip/blob/main/tests/roundtrip.rs",
+      "path": "tests/roundtrip.rs",
+      "notes": "Read from the local checkout on 2026-10-14. The GitHub URL assumes the repository is pushed to main."
+    },
+    {
+      "id": "src-fuzz",
+      "title": "wal_parse fuzz target",
+      "url": "https://github.com/nickstrad/walflip/blob/main/fuzz/fuzz_targets/wal_parse.rs",
+      "path": "fuzz/fuzz_targets/wal_parse.rs",
+      "notes": "Read from the local checkout on 2026-10-14. The GitHub URL assumes the repository is pushed to main."
+    },
+    {
+      "id": "src-fuzz-cargo",
+      "title": "Fuzz crate manifest",
+      "url": "https://github.com/nickstrad/walflip/blob/main/fuzz/Cargo.toml",
+      "path": "fuzz/Cargo.toml",
+      "notes": "Read from the local checkout on 2026-10-14. The GitHub URL assumes the repository is pushed to main."
+    },
+    {
+      "id": "src-seed",
+      "title": "Seed script",
+      "url": "https://github.com/nickstrad/walflip/blob/main/scripts/seed.sh",
+      "path": "scripts/seed.sh",
+      "notes": "Read from the local checkout on 2026-10-14. The GitHub URL assumes the repository is pushed to main."
+    },
+    {
+      "id": "src-example",
+      "title": "Example schema",
+      "url": "https://github.com/nickstrad/walflip/blob/main/examples/processes.sql",
+      "path": "examples/processes.sql",
+      "notes": "Read from the local checkout on 2026-10-14. The GitHub URL assumes the repository is pushed to main."
+    },
+    {
+      "id": "src-make",
+      "title": "Make targets",
+      "url": "https://github.com/nickstrad/walflip/blob/main/Makefile",
+      "path": "Makefile",
+      "notes": "Read from the local checkout on 2026-10-14. The GitHub URL assumes the repository is pushed to main."
+    },
+    {
+      "id": "src-plan",
+      "title": "Testing plan (bug IDs B1-B8, invariants INV-xx)",
+      "url": "https://github.com/nickstrad/walflip/blob/main/docs/TESTING_PLAN.md",
+      "path": "docs/TESTING_PLAN.md",
+      "notes": "Read from the local checkout on 2026-10-14. The GitHub URL assumes the repository is pushed to main."
+    }
+  ]
+}

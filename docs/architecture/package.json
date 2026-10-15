@@ -1,0 +1,31 @@
+{
+  "name": "walflip-architecture",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "C4 architecture viewer for walflip, rendered with c4-sdk",
+  "engines": {
+    "node": "22.23.2"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "generate": "node scripts/generate-bundle.mjs",
+    "validate": "node scripts/validate.mjs"
+  },
+  "dependencies": {
+    "c4-sdk": "file:vendor/c4-sdk-0.1.0-beta.1.tgz",
+    "react": "19.3.0",
+    "react-dom": "19.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.2",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.7",
+    "@vitejs/plugin-react": "^6.1.1",
+    "typescript": "6.0.3",
+    "vite": "8.3.4"
+  }
+}
