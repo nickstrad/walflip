@@ -141,7 +141,7 @@ fn s13_concurrent_exec() {
 
     let d = Db::existing(&root, "x").unwrap();
     let status = db::status(&d).unwrap();
-    let log = db::log(&d, u64::MAX >> 1).unwrap();
+    let log = db::log(&d, u64::MAX >> 1, false).unwrap();
     let mut labels: BTreeMap<String, usize> = BTreeMap::new();
     for e in &log {
         *labels.entry(e.sql.clone()).or_default() += 1;

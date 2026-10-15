@@ -58,7 +58,7 @@ pub struct Observed {
 impl Observed {
     pub fn of(d: &Db) -> Self {
         let s = db::status(d).expect("status");
-        let log = db::log(d, u64::MAX >> 1)
+        let log = db::log(d, u64::MAX >> 1, false)
             .expect("log")
             .into_iter()
             .map(|e| LogRow { n: e.n, frames: e.frames, db_pages: e.db_pages, sql: e.sql })

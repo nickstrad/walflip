@@ -50,7 +50,7 @@ cat <<'EOF'
 
 try (database "processes", or set WALFLIP_DB):
   walflip list
-  walflip --db processes log --limit 10
+  walflip --db processes log --limit 10      # the 10 most recent; --head for the first 10, --all for all
   walflip --db processes clone -n 250 -o /tmp/at250.db    # inserts only: 250 rows
   walflip --db processes clone -n 500 -o /tmp/at500.db    # everything: 150 rows
 EOF

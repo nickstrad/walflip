@@ -211,7 +211,7 @@ fn orphan_commit_is_recovered_before_the_statement() {
     assert_eq!(r, db::ExecReport { captured: 2, recovered: 1 });
     drop(ext);
 
-    let labels: Vec<String> = db::log(&d, 10).unwrap().into_iter().map(|e| e.sql).collect();
+    let labels: Vec<String> = db::log(&d, 10, false).unwrap().into_iter().map(|e| e.sql).collect();
     assert_eq!(labels, [ins("a"), db::RECOVERED_LABEL.to_string(), ins("b")]);
 
     let mut m = Model::new(Some(SCHEMA));

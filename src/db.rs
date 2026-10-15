@@ -392,13 +392,17 @@ pub struct LogEntry {
     pub sql: String,
 }
 
-pub fn log(db: &Db, limit: u64) -> Result<Vec<LogEntry>> {
+/// Commits in ascending order. `from_end` selects the last `limit` commits instead of the first.
+pub fn log(db: &Db, limit: u64, from_end: bool) -> Result<Vec<LogEntry>> {
     let store = Store::open(&db.meta)?;
-    let mut st = store.conn().prepare(
-        "SELECT c.idx, count(f.seq), c.db_pages, c.label
-         FROM commits c LEFT JOIN frames f ON f.commit_idx = c.idx
-         GROUP BY c.idx ORDER BY c.idx LIMIT ?1",
-    )?;
+    let dir = if from_end { "DESC" } else { "ASC" };
+    let mut st = store.conn().prepare(&format!(
+        "SELECT idx, frames, db_pages, label FROM (
+           SELECT c.idx AS idx, count(f.seq) AS frames, c.db_pages AS db_pages, c.label AS label
+           FROM commits c LEFT JOIN frames f ON f.commit_idx = c.idx
+           GROUP BY c.idx ORDER BY c.idx {dir} LIMIT ?1
+         ) ORDER BY idx"
+    ))?;
     let rows = st.query_map([limit], |r| {
         Ok(LogEntry { n: r.get(0)?, frames: r.get(1)?, db_pages: r.get(2)?, sql: r.get(3)? })
     })?;
@@ -529,7 +533,7 @@ mod tests {
         exec(&d, &[big]).unwrap();
         exec(&d, &["DROP TABLE a;".to_string()]).unwrap();
         let total = Store::open(&d.meta).unwrap().commit_count().unwrap();
-        let pages: Vec<u64> = log(&d, 10).unwrap().iter().map(|e| e.db_pages).collect();
+        let pages: Vec<u64> = log(&d, 10, false).unwrap().iter().map(|e| e.db_pages).collect();
         assert!(pages.windows(2).any(|w| w[1] < w[0]), "db never shrank: {pages:?}");
         for n in 0..=total {
             let out = tmp.path().join(format!("c{n}.db"));
@@ -573,7 +577,7 @@ mod tests {
     }
 
     fn labels(d: &Db) -> Vec<String> {
-        log(d, 100).unwrap().into_iter().map(|e| e.sql).collect()
+        log(d, 100, false).unwrap().into_iter().map(|e| e.sql).collect()
     }
 
     /// INV-38 backstop, kept covered now that orphans are recovered up front: a foreign writer

@@ -473,3 +473,28 @@ fn seed_script_produces_500_commits() {
     assert_eq!(ints(&a, "SELECT count(*) FROM processes"), [250]);
     assert_eq!(ints(&b, "SELECT count(*) FROM processes"), [150]);
 }
+
+fn log_ns(out: &str) -> Vec<u64> {
+    out.lines().skip(1).map(|l| l.split_whitespace().next().unwrap().parse().unwrap()).collect()
+}
+
+#[test]
+fn log_defaults_to_most_recent_ascending_with_head_and_all() {
+    let h = Harness::new();
+    h.create("notes", NOTES);
+    for i in 1..=25 {
+        h.exec("notes", &format!("INSERT INTO notes(body) VALUES('n{i}')"));
+    }
+    let log = |extra: &[&str]| {
+        let mut a = vec!["--db", "notes", "log"];
+        a.extend_from_slice(extra);
+        log_ns(&h.ok(&a))
+    };
+    assert_eq!(log(&[]), (6..=25).collect::<Vec<_>>(), "default: last 20, ascending");
+    assert_eq!(log(&["--limit", "3"]), [23, 24, 25]);
+    assert_eq!(log(&["--head", "--limit", "3"]), [1, 2, 3]);
+    assert_eq!(log(&["--head"]), (1..=20).collect::<Vec<_>>());
+    assert_eq!(log(&["--all"]), (1..=25).collect::<Vec<_>>());
+    assert_eq!(log(&["--limit", "0"]), Vec::<u64>::new(), "--limit 0 prints only the header");
+    assert!(h.err(&["--db", "notes", "log", "--head", "--all"]).contains("cannot be used"));
+}

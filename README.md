@@ -49,7 +49,7 @@ Every `exec` statement is one transaction and one commit. `clone -n N` replays t
 | `rename <old> <new>` | Rename a database; history is preserved. |
 | `drop <name>` | Delete a database and its history. |
 | `exec <sql>` / `exec -` | Run a statement, or read one statement per line from stdin. Each statement is its own commit. |
-| `log [--limit N]` | Show captured commits: frames written, database size in pages, SQL. |
+| `log [--limit N] [--head] [--all]` | Show captured commits (frames written, database size in pages, SQL), oldest first. Default: the most recent 20. `--head` shows the first N instead; `--all` shows everything; `--limit 0` shows only the header. `--head` and `--all` conflict. |
 | `status` | Page size, commit and frame counts, whether a live WAL exists. |
 | `clone -n N -o <file>` | Write the database as of commit `N` to `<file>`, then run `integrity_check` and print row counts. `-n 0` is the initial snapshot. |
 

@@ -38,10 +38,17 @@ enum Cmd {
     /// Run SQL against --db; each statement is one transaction. Use `-` to read
     /// one statement per line from stdin.
     Exec { sql: String },
-    /// List captured commits for --db
+    /// List captured commits for --db: the most recent --limit, oldest first
     Log {
+        /// How many commits to show (0 shows none, only the header)
         #[arg(short, long, default_value_t = 20)]
         limit: u64,
+        /// Show the first --limit commits instead of the most recent
+        #[arg(long, conflicts_with = "all")]
+        head: bool,
+        /// Show every commit (ignores --limit)
+        #[arg(long)]
+        all: bool,
     },
     /// Summarise what has been captured for --db
     Status,
@@ -108,9 +115,10 @@ fn main() -> Result<()> {
             }
             println!("captured {} commit(s)", r.captured);
         }
-        Cmd::Log { limit } => {
+        Cmd::Log { limit, head, all } => {
+            let (limit, from_end) = if all { (i64::MAX as u64, false) } else { (limit, !head) };
             println!("{:>5} {:>6} {:>8}  sql", "n", "frames", "db_pages");
-            for e in db::log(&open()?, limit)? {
+            for e in db::log(&open()?, limit, from_end)? {
                 let sql: String = e.sql.chars().take(90).collect();
                 println!("{:>5} {:>6} {:>8}  {sql}", e.n, e.frames, e.db_pages);
             }
