@@ -87,6 +87,21 @@ impl Harness {
         parse_captured(&self.ok(&["--db", db, "exec", sql]))
     }
 
+    /// Run `exec -` on `db` with `sql` on stdin (one statement per line, one commit each) and
+    /// return the bytes of `live.db-wal` afterwards, as a real WAL file. A read transaction on
+    /// `live.db` is held across the `exec`, so the close-time checkpoint cannot reset the WAL
+    /// before it is copied. Used for fuzz seeds.
+    pub fn wal_snapshot(&self, db: &str, sql: &str) -> Vec<u8> {
+        let live = self.root().join(db).join("live.db");
+        let conn = Connection::open(&live).unwrap();
+        conn.execute_batch("BEGIN; SELECT count(*) FROM sqlite_master;").unwrap();
+        let o = self.with_stdin(&["--db", db, "exec", "-"], sql);
+        assert!(o.status.success(), "exec failed: {}", String::from_utf8_lossy(&o.stderr));
+        let wal = std::fs::read(format!("{}-wal", live.display())).unwrap();
+        conn.execute_batch("COMMIT").unwrap();
+        wal
+    }
+
     /// Commit count as reported by `status --db <db>`.
     pub fn commits(&self, db: &str) -> u64 {
         let out = self.ok(&["--db", db, "status"]);
