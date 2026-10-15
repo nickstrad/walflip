@@ -106,11 +106,11 @@ Legend. Status: `ok` covered today, `gap` not tested, `FAIL` confirmed failing (
 | INV-54 | Schema with a syntax error, a constraint violation in its seed rows, or a missing file: non-zero exit, message names the stage (`reading schema` / `applying schema`), no folder left, `list` unchanged. | existing + add constraint-violation case | E | ok |
 | INV-55 | `--schema -` reads stdin; identical result to the file form (byte-identical `base.db`). | existing + byte compare | E | partial |
 | INV-56 | Empty schema file == no `--schema`: `base.db` identical, `page size 4096`. | e2e | E | gap (manual ok) |
-| INV-57 | Schema containing `BEGIN; ... COMMIT;` works; an unterminated `BEGIN` fails cleanly with an `applying schema` message and no folder. | e2e | E | ok / sus (B8 message) |
-| INV-58 | A schema that changes `journal_mode` is rejected (or WAL is re-asserted) so that `live.db` is in WAL mode after `create`; `exec` refuses to run against a non-WAL `live.db`. | e2e with `PRAGMA journal_mode=DELETE` | E | FAIL (B5) |
-| INV-59 | `PRAGMA page_size=N` in a schema either takes effect (reported page size N, `meta.page_size == N`, clones valid) or is rejected with a message; never silently ignored. Decision needed (Q7). | e2e | E | sus (B7) |
+| INV-57 | Schema containing `BEGIN; ... COMMIT;` works; an unterminated `BEGIN` fails cleanly with an `applying schema` message and no folder. | e2e | E | ok: S18 (`s18_unterminated_begin`, `s18_begin_commit_in_schema`) |
+| INV-58 | A schema that changes `journal_mode` is rejected (or WAL is re-asserted) so that `live.db` is in WAL mode after `create`; `exec` refuses to run against a non-WAL `live.db`. | e2e with `PRAGMA journal_mode=DELETE` | E | ok: S18 `s18_journal_mode_delete_is_rejected`, `s18_exec_attach_and_journal_mode_are_denied` (T15) |
+| INV-59 | `PRAGMA page_size=N` in a schema either takes effect (reported page size N, `meta.page_size == N`, clones valid) or is rejected with a message; never silently ignored. Decision needed (Q7). | e2e | E | ok: S18 `s18_page_size_pragma` expects 8192 (T15) |
 | INV-60 | `base.db` has no `-wal`/`-shm`, `PRAGMA journal_mode` of a copy of `base.db` is `wal`, and `base.db` is byte-identical to `live.db` right after `create`. | e2e | E | gap |
-| INV-61 | A schema containing `ATTACH` can write outside the root. Decide: allow (document) or deny (`SQLITE_DBCONFIG_DEFENSIVE` / authorizer denying `SQLITE_ATTACH`). Until decided, the fuzzer must never execute schema text. | e2e once decided | E | open (Q8) |
+| INV-61 | A schema containing `ATTACH` can write outside the root. Decide: allow (document) or deny (`SQLITE_DBCONFIG_DEFENSIVE` / authorizer denying `SQLITE_ATTACH`). Until decided, the fuzzer must never execute schema text. | e2e once decided | E | ok: denied in create and exec (T15, Q8) |
 | INV-62 | Database names: accepted iff `[A-Za-z0-9_-]{1,64}`; path-like names rejected; `create` with an invalid name creates nothing. | existing `validate_name` tests + e2e | U/E | ok |
 
 ### 1.6 Priority order for fixing (likely real bugs)
