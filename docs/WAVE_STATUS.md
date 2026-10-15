@@ -115,6 +115,8 @@ previous merge.
 
 ## CI scope
 
-Only the PR/push job (`.github/workflows/ci.yml`: `cargo test`, fuzz build, corpus replay) is active. The
-nightly fuzz workflow was archived to `archive/ci/fuzz-nightly.yml` on request: this is a one-off
-project, not a long-lived tool. Fuzzing is local (`make fuzz`). The runner is pinned to `ubuntu-24.04`.
+Only `.github/workflows/ci.yml` is active: `cargo test --features testing` on PRs and pushes to
+`main`. The nightly fuzz workflow and the PR-time fuzz build + corpus replay job were both archived
+on request (`archive/ci/fuzz-nightly.yml`, `archive/ci/fuzz-build-replay.yml`): this is a one-off
+project, not a long-lived tool. Fuzzing is local (`make fuzz`, `make fuzz-replay`). The runner is
+pinned to `ubuntu-24.04`.

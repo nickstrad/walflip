@@ -1,0 +1,35 @@
+# ARCHIVED, not active (GitHub only runs workflows under .github/workflows/).
+# This was the second job of ci.yml: build every fuzz target with nightly and replay the committed
+# corpora with -runs=0 as a regression check. Removed for a one-off project; the PR job now runs only
+# `cargo test --features testing`. To revive: move it to .github/workflows/ and keep the triggers.
+#
+# Things worth studying: a separate workspace cache (workspaces: fuzz), `cargo install cargo-fuzz
+# --locked`, per-target flags (-max_len=70000 for wal_parse, -dict, -rss_limit_mb), and the
+# fuzz-only LIBSQLITE3_FLAGS=-DSQLITE_NO_SYNC that is kept out of the test job.
+name: fuzz-build-replay
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  fuzz-build-replay:
+    # Pinned runner, see the note on the test job.
+    runs-on: ubuntu-24.04
+    env:
+      # Fuzz crate only (fuzz/ is its own workspace): no fsync, avoids libFuzzer timeouts. Not set in the test job.
+      LIBSQLITE3_FLAGS: -DSQLITE_NO_SYNC
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+      - run: cargo install cargo-fuzz --locked
+      - run: cargo +nightly fuzz build
+      - name: Replay committed corpora
+        run: |
+          for t in wal_parse wal_differential replay_apply store_capture statements_split exec_sql; do
+            extra=""
+            if [ "$t" = wal_parse ]; then extra="-max_len=70000"; fi
+            cargo +nightly fuzz run "$t" "fuzz/corpus/$t" -- -runs=0 -rss_limit_mb=1024 -dict=fuzz/wal.dict $extra
+          done
