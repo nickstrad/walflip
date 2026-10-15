@@ -12,7 +12,24 @@ trap 'rm -rf "$tmp"' EXIT
 ps -axo pid=,ppid=,pcpu=,rss=,stat=,comm= > "$tmp/a.txt"
 sleep 1
 ps -axo pid=,ppid=,pcpu=,rss=,stat=,comm= > "$tmp/b.txt"
-[[ $(wc -l < "$tmp/a.txt") -ge 250 ]] || { echo "need at least 250 processes" >&2; exit 1; }
+# Test hook: SEED_FAKE_PS_ROWS=N truncates both ps samples to N rows to exercise the padding path.
+if [[ -n ${SEED_FAKE_PS_ROWS:-} ]]; then
+  head -n "$SEED_FAKE_PS_ROWS" "$tmp/a.txt" > "$tmp/a.t" && mv "$tmp/a.t" "$tmp/a.txt"
+  head -n "$SEED_FAKE_PS_ROWS" "$tmp/b.txt" > "$tmp/b.t" && mv "$tmp/b.t" "$tmp/b.txt"
+fi
+
+# Small hosts (CI containers) can have fewer than 250 processes. Pad with synthetic rows so the
+# output is deterministic: pids from 90000000 up cannot collide with real pids (pid_max <= 2^22),
+# and the second sample differs in rss and cpu so each UPDATE changes the row.
+have=$(($(wc -l < "$tmp/a.txt")))
+if (( have < 250 )); then
+  echo "seed.sh: only $have processes from ps; padding with $((250 - have)) synthetic rows" >&2
+  for (( i = have + 1; i <= 250; i++ )); do
+    pid=$((90000000 + i)); rss=$((2048 + i * 16))
+    echo "$pid 1 0.$((i % 10)) $rss S fakeproc-$i" >> "$tmp/a.txt"
+    echo "$pid 1 1.$((i % 10)) $((rss + 4096)) S fakeproc-$i" >> "$tmp/b.txt"
+  done
+fi
 
 # Pass 1 (b.txt): remember the second sample. Pass 2 (a.txt): first 250 rows become INSERTs;
 # END emits 150 UPDATEs (rows 1..150) interleaved with 100 DELETEs (rows 151..250).
