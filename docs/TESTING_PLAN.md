@@ -14,7 +14,6 @@ Confirmed by running the debug binary while writing this plan (reproductions in 
 | # | Confirmed defect | Severity |
 |---|---|---|
 | B1 | `summarize` does not double `"` in table names: `exec 'CREATE TABLE "a""b"(x)'` then `clone` writes the file, then exits 1 (`unrecognized token`). | medium |
-| B2 | A statement containing `COMMIT` (`INSERT ...; COMMIT; INSERT ...;`) commits to `live.db`, `tx.commit()` then fails, capture never runs, the process closes and SQLite checkpoints the WAL. History has 0 commits while `live.db` has 2 rows; the next `exec` produces commit 1 whose page already holds 3 rows. Lost history. | high |
 | B3 | Commits already in `live.db-wal` when `exec` starts (crashed writer, external writer) are captured under the label of the next statement, and `exec` reports more commits than statements. | medium |
 | B4 | Concurrent `exec` on one db (6 procs x 15 inserts): 11 failures `UNIQUE constraint failed: commits.idx`, 120 commits recorded for 90 rows, duplicated labels. The cursor is read outside the `meta.db` transaction. | high |
 | B6 | `replay::apply` with a huge `pgno` or `db_pages` calls `Vec::resize` to terabytes: abort, not `Err`. Reachable from a crafted `meta.db`/WAL; the fuzzer will hit it immediately. | medium |
@@ -82,9 +81,9 @@ Legend. Status: `ok` covered today, `gap` not tested, `FAIL` confirmed failing (
 | INV-34 | `clone` never mutates `live.db`, `base.db`, `meta.db` (hash before/after) and never creates `-wal`/`-shm` beside the output. | harness | E | gap |
 | INV-35 | `clone` to an existing path refuses and leaves that file byte-identical; `-n > total` refuses and creates nothing. | existing | E | ok |
 | INV-36 | `clone` into an unwritable directory -> non-zero exit, no partial file, db state unchanged. | chmod 0o555 dir (skip when root) | E | gap |
-| INV-37 | A failing statement changes nothing: live rows, `status`, WAL commit count, `meta.db` hash all unchanged. | harness | E | ok (simple) / FAIL for `COMMIT`-containing statements (B2) |
-| INV-38 | One `exec` statement produces at most one commit; a statement that writes nothing produces zero. | harness: `captured N` with N <= 1 per statement | E | ok (no-op) / FAIL (B2, B3) |
-| INV-39 | Rows committed to `live.db` by `exec` are always represented in history: after any `exec` (success or error), `clone -n total` == `live.db` contents. | harness `assert_invariants` after failed steps too | E | FAIL (B2) |
+| INV-37 | A failing statement changes nothing: live rows, `status`, WAL commit count, `meta.db` hash all unchanged. | harness | E | ok: S10 (`tests/scenarios_failure.rs`); transaction control in `exec` is rejected by the authorizer (Q2, T14) |
+| INV-38 | One `exec` statement produces at most one commit; a statement that writes nothing produces zero. | harness: `captured N` with N <= 1 per statement | E | ok (T14: `exec` errors after capturing when one statement yields >1 commit) / FAIL (B3: orphan WAL commits make the next statement yield 2, now an error, fixed by T16) |
+| INV-39 | Rows committed to `live.db` by `exec` are always represented in history: after any `exec` (success or error), `clone -n total` == `live.db` contents. | harness `assert_invariants` after failed steps too | E | ok: S10; backstop captures on the error path whenever the failed statement changed the WAL |
 | INV-40 | DDL via `exec` (`CREATE TABLE/INDEX/TRIGGER`, `ALTER TABLE ADD/RENAME COLUMN`, `DROP TABLE`) is captured and visible in `clone` at that commit; `sqlite_master` of clone(k) == model. | schema-evolution scenario | E | partial |
 | INV-41 | Large payloads: a 300 KB blob spans ~75 overflow pages, all captured; blob hash equal in clone. | large-payload scenario | E | gap (manual ok) |
 | INV-42 | `db_pages` may shrink (VACUUM, auto_vacuum). After a shrinking commit s, `len(clone(s)) < len(clone(s-1))`, integrity ok, later growth replays correctly. | library scenario: open `live.db` with `wal_autocheckpoint=0`, run `VACUUM`, call `Store::capture`, then clone | L | gap (manual ok) |
@@ -95,7 +94,7 @@ Legend. Status: `ok` covered today, `gap` not tested, `FAIL` confirmed failing (
 | INV-47 | `summarize`/clone report works for any table name SQLite accepts (quotes, spaces, unicode, keywords). | DDL scenario with `CREATE TABLE "a""b"`, `"with space"`, `"select"` | E | FAIL (B1) |
 | INV-48 | Concurrent readers on `live.db` (a held read transaction) during `exec`: exec succeeds, capture complete, no duplicates on the next `exec` even though the WAL was not checkpointed. | spawn `python3 -I`/rusqlite reader holding `BEGIN; SELECT` | E | gap |
 | INV-49 | Concurrent `clone -n k` of the same db (same and different k) all succeed and are byte-identical per k. | spawn 8 processes | E | gap |
-| INV-50 | `exec -` splits on lines: a multi-line statement fails with `incomplete input`, nothing committed, earlier lines kept. Documented behaviour. | e2e | E | gap (manual ok) |
+| INV-50 | `exec -` splits on lines: a multi-line statement fails with `incomplete input`, nothing committed, earlier lines kept. Documented behaviour. | e2e | E | ok: S10 |
 | INV-51 | `exec` with 2000 single-row inserts in one batch finishes in bounded time (WAL is re-read per statement: O(N * WAL)). Budget: < 10 s debug. | timed scenario, `#[ignore]` by default | E | gap |
 
 ### 1.5 Create / schema file
@@ -116,7 +115,6 @@ Legend. Status: `ok` covered today, `gap` not tested, `FAIL` confirmed failing (
 
 ### 1.6 Priority order for fixing (likely real bugs)
 
-1. INV-39/INV-37 (B2) lost history on `COMMIT` inside a statement: capture must run even when `tx.commit()` fails, or `exec` must reject statements that end the transaction (e.g. check `conn.is_autocommit()` before `tx.commit()`, then capture with a `(partial)` label).
 2. INV-24 (B4) concurrent exec: open the `meta.db` transaction with `BEGIN IMMEDIATE` *before* reading the cursor and the WAL, or hold a lock file in the db folder for the whole `exec`.
 4. INV-25 (B3) uncaptured-commit labelling: capture before the first statement with label `(recovered)`.
 5. INV-15 (B6) replay allocation bound.
@@ -225,7 +223,7 @@ Each scenario asserts the full `assert_invariants` set after every step unless s
 | S7 | schema evolution | `ALTER TABLE ADD COLUMN` with default, `ALTER TABLE RENAME COLUMN`, `ALTER TABLE RENAME TO`, inserts between | shadow | INV-40, INV-30 |
 | S8 | delete-everything-then-reinsert | 200 inserts (batch), `DELETE FROM t`, 200 inserts again, `DELETE WHERE id%2=0` | shadow; `db_pages` non-decreasing without auto_vacuum | INV-30, INV-33 |
 | S9 | VACUUM / shrink | (a) `exec VACUUM` -> error, state unchanged; (b) library step `ExternalVacuum` (open live with `wal_autocheckpoint=0`, `VACUUM`, `Store::capture(wal, "VACUUM")`) then more inserts | `len(clone(s)) < len(clone(s-1))`; final clone == live bytes | INV-42, INV-37 |
-| S10 | interrupted / failed batch | stdin batch with a bad line in the middle; a statement with `; COMMIT;` inside; a `BEGIN` without `COMMIT`; a multi-line statement | shadow fed only successful statements; after each failure `clone(total) == live` | INV-37, INV-39 (B2 fails), INV-50 |
+| S10 | interrupted / failed batch | stdin batch with a bad line in the middle; a statement with `; COMMIT;` inside; a `BEGIN` without `COMMIT`; a multi-line statement | shadow fed only successful statements; after each failure `clone(total) == live` | INV-37, INV-39, INV-50 |
 | S11 | clone chain | 30 commits; for all n<m sampled pairs, `apply(frames n+1..=m)` on clone(n) == clone(m); clone(total) == live | byte compare | INV-32, INV-31 |
 | S12 | concurrent clones | 8 processes clone the same db, half `-n 10` half `-n 20`, to distinct paths; 2 processes race for the same path | all `-n 10` identical; exactly one of the racers succeeds or both fail, file (if any) is a valid clone | INV-49, INV-35 |
 | S13 | concurrent exec (open question) | 4 processes x 20 inserts on one db | expected: 80 commits, labels == statements; today 120 and `UNIQUE` errors | INV-24 (B4 fails) |
@@ -258,7 +256,7 @@ Model tiers: `haiku` mechanical, `sonnet` well-specified implementation, `opus` 
 | T11 | Replay bound (B6): `apply` returns `Err` for `pgno > db_pages` and for images above a cap; unit tests INV-15 | `src/replay.rs`, `src/db.rs` (pass cap) | `apply(.., [(u32::MAX, page)], None)` is `Err` in < 1 ms; all replay proptests green | – | sonnet |
 | T12 | Concurrency scenarios S12, S13, S14, S15 (helpers spawn `python3 -I` or a tiny Rust bin under `tests/bin/`) | `tests/scenarios_concurrency.rs`, `tests/common/helpers.rs` | S12, S14 green; S13, S15 red with messages quoting counts (expected vs got) | T03 | opus (timing-sensitive, must avoid flakiness, documents real bugs) |
 | T13 | Fix B1 quoting in `summarize` | `src/db.rs` | S6 green; unit test for `"a""b"` | T06 | haiku |
-| T14 | Fix B2: detect transaction ended by the statement (`conn.is_autocommit()`), capture anyway, surface error; S10 implementation | `src/db.rs`, `tests/scenarios_failure.rs` | S10 green: after `; COMMIT;` statement, history has the committed rows, `exec` exits non-zero | T03 | opus (semantics decision + bug fix) |
+| T14 | Fix B2 (done; per Q2 decision: authorizer rejects BEGIN/COMMIT/ROLLBACK in `exec`, capture on the error path as backstop, error if >1 commit per statement); S10 implementation | `src/db.rs`, `tests/scenarios_failure.rs` | S10 green: after `; COMMIT;` statement, history has the committed rows, `exec` exits non-zero | T03 | opus (semantics decision + bug fix) |
 | T15 | Fix B5: verify `journal_mode == wal` after schema; `exec` asserts WAL mode | `src/db.rs` | S18 journal_mode case green: `create` fails with `schema changed journal_mode`, no folder | T07 | sonnet |
 | T16 | Fix B4 concurrency: `BEGIN IMMEDIATE` on `meta.db` before reading WAL+cursor (or lock file); fix B3: pre-capture orphans with `(recovered)` label | `src/store.rs`, `src/db.rs` | S13 and S15 green 20 runs in a row; roundtrip still green | T12 | opus (locking design across two SQLite files) |
 | T17 | Fuzz target `wal_differential` + `Mutation` enum + dictionary | `fuzz/fuzz_targets/wal_differential.rs`, `fuzz/wal.dict`, `fuzz/Cargo.toml` | 5 min run clean after T10; finds a planted parser bug (temporarily remove the salt check) within 60 s | T01 | opus (differential design, mutation semantics) |

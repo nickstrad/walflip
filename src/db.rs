@@ -4,6 +4,7 @@ use crate::{replay, store::Store};
 use anyhow::{bail, Context, Result};
 use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
 use rusqlite::{Connection, OpenFlags};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::fs::{self, OpenOptions};
 use std::io::{ErrorKind, Write};
@@ -86,28 +87,37 @@ pub fn create(db: &Db, schema: Option<&str>) -> Result<Created> {
 type Denied = Arc<Mutex<Option<String>>>;
 
 /// Install an authorizer that denies `ATTACH`, `DETACH` and `PRAGMA journal_mode`. Other pragmas
-/// (`page_size`, `auto_vacuum`, ...) and transaction control stay allowed; callers that need more
-/// denials can extend `deny_reason`.
-fn install_authorizer(conn: &Connection) -> Denied {
+/// (`page_size`, `auto_vacuum`, ...) stay allowed. Transaction control (`BEGIN`/`COMMIT`/`END`/
+/// `ROLLBACK`) is denied only while `deny_tx` is set: `exec` sets it around user statements (its
+/// own `BEGIN`/`COMMIT` must still pass), `create` passes `None` so schemas may use transactions.
+fn install_authorizer(conn: &Connection, deny_tx: Option<Arc<AtomicBool>>) -> Denied {
     let denied: Denied = Arc::new(Mutex::new(None));
     let slot = denied.clone();
-    conn.authorizer(Some(move |ctx: AuthContext<'_>| match deny_reason(&ctx.action) {
-        Some(reason) => {
-            *slot.lock().unwrap() = Some(reason);
-            Authorization::Deny
+    conn.authorizer(Some(move |ctx: AuthContext<'_>| {
+        let tx = deny_tx.as_ref().is_some_and(|f| f.load(Ordering::SeqCst));
+        match deny_reason(&ctx.action, tx) {
+            Some(reason) => {
+                *slot.lock().unwrap() = Some(reason);
+                Authorization::Deny
+            }
+            None => Authorization::Allow,
         }
-        None => Authorization::Allow,
     }));
     denied
 }
 
-fn deny_reason(action: &AuthAction<'_>) -> Option<String> {
+fn deny_reason(action: &AuthAction<'_>, deny_tx: bool) -> Option<String> {
     match action {
         AuthAction::Attach { .. } => Some("ATTACH is not allowed".into()),
         AuthAction::Detach { .. } => Some("DETACH is not allowed".into()),
         AuthAction::Pragma { pragma_name, .. } if pragma_name.eq_ignore_ascii_case("journal_mode") => {
             Some("PRAGMA journal_mode is not allowed (walflip manages WAL mode)".into())
         }
+        AuthAction::Transaction { .. } if deny_tx => Some(
+            "transaction control (BEGIN/COMMIT/END/ROLLBACK) is not allowed in exec: \
+             each statement already runs in its own transaction"
+                .into(),
+        ),
         _ => None,
     }
 }
@@ -132,7 +142,7 @@ fn init_files(db: &Db, schema: Option<&str>) -> Result<u32> {
     let conn = Connection::open(&db.live)?;
     // Schema first, in rollback mode, so page_size/auto_vacuum pragmas take effect.
     if let Some(sql) = schema {
-        let denied = install_authorizer(&conn);
+        let denied = install_authorizer(&conn, None);
         with_denial(conn.execute_batch(sql), &denied, "applying schema".into())?;
         if !conn.is_autocommit() {
             bail!("applying schema: schema left a transaction open (unterminated BEGIN)");
@@ -196,23 +206,67 @@ pub fn drop_db(db: &Db) -> Result<()> {
 /// Run each statement as its own transaction and capture the commits it produced.
 /// Returns the total number of commits captured. A statement that changes nothing
 /// (e.g. an UPDATE that matches no rows) writes no WAL frames and so adds no commit.
+///
+/// Statements may not control the transaction (`BEGIN`/`COMMIT`/`ROLLBACK`, plan Q2): the
+/// authorizer rejects them, so a statement like `INSERT ...; COMMIT; INSERT ...` fails and
+/// nothing it did is committed. As a backstop (INV-39), a failed statement whose run changed the
+/// WAL is still captured, so `live.db` and history cannot diverge; and a statement that yields
+/// more than one commit is an error (INV-38) after its commits are captured.
 pub fn exec(db: &Db, statements: &[String]) -> Result<usize> {
     let mut store = Store::open(&db.meta)?;
     let conn = Connection::open(&db.live)?;
     assert_wal(&conn)?;
-    let denied = install_authorizer(&conn);
+    let deny_tx = Arc::new(AtomicBool::new(false));
+    let denied = install_authorizer(&conn, Some(deny_tx.clone()));
     // Stop SQLite from folding the WAL back into the db while we are still reading it.
     conn.pragma_update(None, "wal_autocheckpoint", 0)?;
 
     let wal = db.wal_path();
     let mut total = 0;
     for stmt in statements {
-        let tx = conn.unchecked_transaction()?;
-        with_denial(tx.execute_batch(stmt), &denied, format!("failed: {stmt}"))?;
-        tx.commit()?;
-        total += store.capture(&wal, stmt)?;
+        let before = wal_fingerprint(&wal);
+        let ran = run_statement(&conn, &deny_tx, &denied, stmt);
+        if let Err(e) = ran {
+            // Backstop: anything that reached live.db despite the error must reach history too.
+            // Skip capture when the WAL is untouched so a clean failure leaves meta.db as is.
+            if wal_fingerprint(&wal) == before {
+                return Err(e);
+            }
+            let n = store.capture(&wal, stmt).with_context(|| format!("{e:#}"))?;
+            if n == 0 {
+                return Err(e);
+            }
+            return Err(e.context(format!("{n} commit(s) from this statement reached live.db and were captured")));
+        }
+        let n = store.capture(&wal, stmt)?;
+        total += n;
+        if n > 1 {
+            bail!("statement produced {n} commits (at most 1 expected); all were captured: {stmt}");
+        }
     }
     Ok(total)
+}
+
+/// Run one user statement in its own transaction, with transaction control denied inside it.
+fn run_statement(conn: &Connection, deny_tx: &AtomicBool, denied: &Denied, stmt: &str) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    deny_tx.store(true, Ordering::SeqCst);
+    let r = tx.execute_batch(stmt);
+    deny_tx.store(false, Ordering::SeqCst);
+    with_denial(r, denied, format!("failed: {stmt}"))?;
+    tx.commit().with_context(|| format!("failed to commit: {stmt}"))?;
+    Ok(())
+}
+
+/// Length and header of the WAL file (the header salt changes when SQLite restarts the WAL), so a
+/// failed statement can tell whether it wrote anything. `None` when there is no WAL.
+fn wal_fingerprint(wal: &Path) -> Option<(u64, Vec<u8>)> {
+    use std::io::Read;
+    let f = fs::File::open(wal).ok()?;
+    let len = f.metadata().ok()?.len();
+    let mut head = Vec::with_capacity(32);
+    f.take(32).read_to_end(&mut head).ok()?;
+    Some((len, head))
 }
 
 pub struct LogEntry {
