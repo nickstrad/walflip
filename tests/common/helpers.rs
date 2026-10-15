@@ -55,6 +55,7 @@ pub fn entry() {
         "gate" => role_gate(&args),
         "reader" => role_reader(&args),
         "crash-writer" => role_crash_writer(&args),
+        "crash-spill" => role_crash_spill(&args),
         other => {
             eprintln!("unknown helper role {other}");
             std::process::exit(2);
@@ -133,6 +134,37 @@ fn role_crash_writer(args: &[String]) -> ! {
     // No sqlite3_close: no checkpoint, no WAL cleanup, exactly like a killed process.
     std::mem::forget(conn);
     std::process::exit(0);
+}
+
+/// args: `[db]`. Opens `db` in rollback-journal mode with a one-page cache, `BEGIN IMMEDIATE`,
+/// inserts enough rows into `meta` to force dirty pages out to the db file (so the journal
+/// holds real before-images), prints `WROTE <n>`, then exits without commit or close. Leaves
+/// a hot `<db>-journal`, like a writer killed mid-transaction.
+fn role_crash_spill(args: &[String]) -> ! {
+    let conn = Connection::open(&args[0]).unwrap();
+    conn.pragma_update(None, "journal_mode", "DELETE").unwrap();
+    conn.pragma_update(None, "synchronous", "OFF").unwrap();
+    conn.pragma_update(None, "cache_size", 1).unwrap();
+    conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let n = 400;
+    for i in 0..n {
+        conn.execute(
+            "INSERT INTO meta(key, value) VALUES(?1, hex(zeroblob(2000)))",
+            [format!("junk{i}")],
+        )
+        .unwrap();
+    }
+    say(&format!("WROTE {n}"));
+    std::mem::forget(conn);
+    std::process::exit(0);
+}
+
+/// Leave a hot rollback journal on the sqlite db at `db` (needs a `meta` table); see
+/// `role_crash_spill`.
+pub fn crash_spill(db: &Path) -> Finished {
+    let mut h = spawn("crash-spill", &[db.display().to_string()]);
+    h.release(b"");
+    h.finish()
 }
 
 /// A running helper process with piped stdin/stdout/stderr.

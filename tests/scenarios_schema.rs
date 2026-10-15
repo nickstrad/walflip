@@ -186,3 +186,70 @@ fn s18_exec_attach_and_journal_mode_are_denied() {
     assert_eq!(h.exec("ex", "INSERT INTO t VALUES(1)"), 1);
     assert_invariants(&h.root(), "ex", None, Checks::full());
 }
+
+fn pragma_str(path: &std::path::Path, p: &str) -> String {
+    let c = rusqlite::Connection::open(path).unwrap();
+    c.pragma_query_value(None, p, |r| r.get::<_, String>(0)).unwrap_or_else(|_| {
+        c.pragma_query_value(None, p, |r| r.get::<_, i64>(0)).unwrap().to_string()
+    })
+}
+
+/// INV-56: an empty schema file and no `--schema` give byte-identical `base.db`, page size 4096.
+#[test]
+fn s18_empty_schema_equals_no_schema() {
+    let h = Harness::new();
+    let o = create_raw(&h, "withfile", "");
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let o = h.run(&["create", "noschema"]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let a = std::fs::read(h.root().join("withfile/base.db")).unwrap();
+    let b = std::fs::read(h.root().join("noschema/base.db")).unwrap();
+    assert!(a == b, "base.db differs ({} vs {} bytes)", a.len(), b.len());
+    for n in ["withfile", "noschema"] {
+        assert_eq!(pragma_str(&h.root().join(n).join("base.db"), "page_size"), "4096");
+        assert_base_is_live(&h, n);
+    }
+}
+
+/// INV-60: no `-wal`/`-shm` next to `base.db`, a copy of it reports `wal`, `base == live`.
+#[test]
+fn s18_base_db_is_wal_free_and_wal_mode() {
+    let h = Harness::new();
+    h.create("b", MULTI);
+    let dir = h.root().join("b");
+    for suffix in ["-wal", "-shm"] {
+        let p = dir.join(format!("base.db{suffix}"));
+        assert!(!p.exists(), "{} exists after create", p.display());
+    }
+    assert_base_is_live(&h, "b");
+    let copy = h.path("base_copy.db");
+    std::fs::copy(dir.join("base.db"), &copy).unwrap();
+    assert_eq!(pragma_str(&copy, "journal_mode"), "wal");
+}
+
+/// INV-58 (exec side): `exec` refuses a `live.db` that was switched out of WAL mode.
+#[test]
+fn s18_exec_refuses_non_wal_live_db() {
+    let h = Harness::new();
+    h.create("w", MULTI);
+    let dir = h.root().join("w");
+    let live = dir.join("live.db");
+    for suffix in ["-wal", "-shm"] {
+        let _ = std::fs::remove_file(dir.join(format!("live.db{suffix}")));
+    }
+    {
+        let c = rusqlite::Connection::open(&live).unwrap();
+        let m: String = c.pragma_update_and_check(None, "journal_mode", "DELETE", |r| r.get(0)).unwrap();
+        assert_eq!(m, "delete", "setup: could not leave WAL mode");
+    }
+    assert!(!dir.join("live.db-wal").exists(), "setup: WAL still present");
+    let meta = dir.join("meta.db");
+    let before = common::invariants::hash_file(&meta);
+    let live_before = std::fs::read(&live).unwrap();
+    let o = h.run(&["--db", "w", "exec", "INSERT INTO t(v) VALUES('nope')"]);
+    assert!(!o.status.success(), "exec succeeded on a non-WAL live.db");
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(err.contains("not in WAL mode"), "unclear message: {err}");
+    assert_eq!(common::invariants::hash_file(&meta), before, "meta.db changed");
+    assert_eq!(std::fs::read(&live).unwrap(), live_before, "live.db changed");
+}

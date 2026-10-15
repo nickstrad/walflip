@@ -331,15 +331,27 @@ fn s20_leftover_meta_journal_does_not_break_reads() {
     let n = h.exec("kv", sql);
     m.exec(sql, n);
     let d = walflip::db::Db::existing(&root, "kv").unwrap();
-    let f = common::helpers::crash_writer(
-        &d.meta,
-        &["BEGIN IMMEDIATE", "INSERT INTO meta(key, value) VALUES('junk', 'x')"],
-    );
-    assert!(f.status.success() && f.stdout.contains("WROTE 2"), "lock holder: {f:?}");
+    let size_before = std::fs::metadata(&d.meta).unwrap().len();
+    let f = common::helpers::crash_spill(&d.meta);
+    assert!(f.status.success() && f.stdout.contains("WROTE 400"), "lock holder: {f:?}");
+    // Prove the precondition: a non-empty hot journal, and the db file was really modified
+    // (dirty pages spilled), so the reads below must roll it back.
+    let mut journal = d.meta.as_os_str().to_owned();
+    journal.push("-journal");
+    let journal = std::path::PathBuf::from(journal);
+    let jlen = std::fs::metadata(&journal)
+        .unwrap_or_else(|e| panic!("setup failed: no {}: {e}", journal.display()))
+        .len();
+    assert!(jlen > 0, "setup failed: {} is empty", journal.display());
+    let size_after = std::fs::metadata(&d.meta).unwrap().len();
+    assert!(size_after > size_before, "setup failed: no spill ({size_before} -> {size_after})");
 
     let st = h.ok(&["--db", "kv", "status"]);
     assert!(st.contains("commits   : 1"), "Q11: status after crashed writer: {st}");
     assert!(h.ok(&["list"]).contains("kv"));
     h.ok(&["--db", "kv", "log"]);
+    h.ok(&["--db", "kv", "clone", "-n", "1", "-o", h.path("kv_clone").to_str().unwrap()]);
+    assert!(!journal.exists(), "hot journal was not rolled back");
+    assert_eq!(std::fs::metadata(&d.meta).unwrap().len(), size_before, "meta.db not rolled back");
     assert_invariants(&root, "kv", Some(&m), Checks::full());
 }
