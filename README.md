@@ -49,7 +49,7 @@ Every `exec` statement is one transaction and one commit. `clone -n N` replays t
 | `list` | List databases and their commit counts. |
 | `rename <old> <new>` | Rename a database; history is preserved. |
 | `drop <name>` | Delete a database and its history. |
-| `exec <sql>` / `exec -` | Run a statement, or read one statement per line from stdin (a statement that spans lines fails with `incomplete input`). Each statement is its own commit. Statements before a failing one stay committed and captured. |
+| `exec <sql>` / `exec -` | Run a statement, or read statements from stdin, one per line (no trailing `;` needed; a statement that spans lines fails with `incomplete input` and that line commits nothing). Each statement is its own commit. Statements before a failing one stay committed and captured. |
 | `log [--limit N] [--head] [--all]` | Show captured commits (frames written, database size in pages, SQL), oldest first. Default: the most recent 20. `--head` shows the first N instead; `--all` shows everything; `--limit 0` shows only the header. `--head` and `--all` conflict. |
 | `status` | Page size, commit and frame counts, and whether a live WAL exists. If the WAL holds commits that are not in history yet, it also prints `uncaptured: N`. |
 | `clone -n N -o <file>` | Write the database as of commit `N` to `<file>`, then run `integrity_check` and print row counts. `-n 0` is the initial snapshot. |
@@ -121,7 +121,8 @@ with no SQL involved.
   other program checkpoints and restarts the WAL first, those changes are in `live.db` but
   are lost from history. If it commits between a walflip statement's commit and its capture,
   that `exec` fails with `statement produced N commits` (all of them are captured).
-- **`exec -` splits on newlines**, not on `;`. A statement must fit on one line.
+- **`exec -` splits on lines**, not on `;`: one statement per non-blank line, no trailing `;` required. A statement that spans several lines fails with `incomplete input` and nothing from that line is committed (earlier lines stay committed). Pass multi-line or multi-statement SQL as one statement per `exec` argument, or put each statement on its own line.
+- **Foreign writers with `POWERSAFE_OVERWRITE` off** (`?psow=0` plus `synchronous=FULL`) make SQLite repeat each commit frame to pad a sector. walflip does not merge them: each padding frame is a separate commit labelled `(recovered)`, so history can show more commits than statements. Replay is still exact, since the copies are identical pages. walflip's own connection never pads.
 - **History is page-level.** The WAL contains pages, not statements. The `sql` shown by
   `log` is the statement you ran, recorded alongside the commit.
 - **A statement that changes nothing is not a commit.** SQLite writes no frames for an
