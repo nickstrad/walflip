@@ -42,6 +42,21 @@ ts/common/mod.rs` (expect a trivial merge conflict there).
 
 Merge order: T04 first, then the rest, then T19. Then run the verify block above.
 
+## Wave 4 decisions (made 2026-10-14, supersede plan section 5 defaults where they differ)
+
+| Q | Decision | Task |
+|---|---|---|
+| Q1 | Support concurrent `exec`. One writer lock (`BEGIN IMMEDIATE` on `meta.db`) taken before the statement tx and held until capture ends; capture runs inside it; `busy_timeout` on both connections. | T16 |
+| Q2 | Reject transaction control in `exec`: authorizer denying `SQLITE_TRANSACTION` (exec only, not `create`). Nothing committed, non-zero exit, error names transaction control. Backstop: capture on the error path, fail if one statement yields >1 commit. | T14 |
+| Q7 | Run schema in rollback mode, check autocommit, switch to WAL, assert `wal`, checkpoint. Reject `PRAGMA journal_mode` via authorizer (code 19). Do NOT deny PRAGMA wholesale: `page_size`/`auto_vacuum` must work. `exec` asserts WAL at the top. | T15 |
+| Q8 | Deny `ATTACH`/`DETACH` (codes 24/25) in `create` AND `exec`. T15 adds the authorizer helper and rusqlite `hooks` feature; T14 reuses it. | T15 |
+| Q9 | `log` default shows the most recent N printed oldest to newest; `--head` gives the old behaviour, `--all` everything. Library `db::log(db, limit, from_end)`. | follow-up after T16 |
+| B9 | `clone_at` opens output with `create_new(true)`, keeps the `exists()` fast fail, removes the file if the write fails; tighten S12 racers to "exactly one succeeds". | folded into T13 |
+| INV-51 | Own task after T16: store byte offset + running checksum in the cursor, parse only the new tail; un-ignore the S20 perf test. | T24 |
+
+Merge order on `src/db.rs`: T13 (+B9), T15, T14, T16, T24, then the `log` change. Because they share
+`db.rs`, these run sequentially (each branches from the previous merge); T20 (CI files only) runs alongside T13.
+
 ## Wave 4 (after Wave 3): bug fixes, needs your decisions first
 
 T13 (B1 quoting), T14 (B2), T15 (B5), T16 (B4, B3), T20 (CI). Decisions needed from the
