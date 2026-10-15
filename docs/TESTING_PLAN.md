@@ -128,6 +128,9 @@ Legend. Status: `ok` covered today, `gap` not tested, `FAIL` confirmed failing (
 
 Known-red scenarios currently merged as `#[ignore]` (T23 removes this list):
 
+- `tests/scenarios_ddl.rs::s6_ddl_quoted_names_cli`: KNOWN FAILING: B1, fixed by T13.
+- `tests/scenarios_schema.rs` journal_mode=DELETE case: KNOWN FAILING: B5, fixed by T15.
+- `tests/perf.rs::s20_stdin_batch_of_2000_inserts`: `#[ignore]`, 53.9 s debug vs 10 s INV-51 budget (no B-number; WAL re-read per statement).
 - `tests/scenarios_concurrency.rs::s13_concurrent_exec`: KNOWN FAILING: B4, fixed by T16.
 - `tests/scenarios_concurrency.rs::s15_writer_dies_mid_life`: KNOWN FAILING: B3, fixed by T16.
 - Suspected B9 (found by T12, no test pinned red): `clone_at` checks `out.exists()` and then
