@@ -20,3 +20,24 @@ path = "fuzz_targets/wal_parse.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "replay_apply"
+path = "fuzz_targets/replay_apply.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "store_capture"
+path = "fuzz_targets/store_capture.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "statements_split"
+path = "fuzz_targets/statements_split.rs"
+test = false
+doc = false
+bench = false
