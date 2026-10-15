@@ -1,6 +1,7 @@
 //! Shared harness: runs the real `walflip` binary against a throwaway data directory.
 #![allow(dead_code)]
 
+pub mod helpers;
 pub mod invariants;
 pub mod model;
 pub mod scenario;

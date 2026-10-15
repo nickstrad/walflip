@@ -126,6 +126,15 @@ Legend. Status: `ok` covered today, `gap` not tested, `FAIL` confirmed failing (
 5. INV-15 (B6) replay allocation bound.
 6. INV-47 (B1) quoting in `summarize`.
 
+Known-red scenarios currently merged as `#[ignore]` (T23 removes this list):
+
+- `tests/scenarios_concurrency.rs::s13_concurrent_exec`: KNOWN FAILING: B4, fixed by T16.
+- `tests/scenarios_concurrency.rs::s15_writer_dies_mid_life`: KNOWN FAILING: B3, fixed by T16.
+- Suspected B9 (found by T12, no test pinned red): `clone_at` checks `out.exists()` and then
+  calls `fs::write`, so two concurrent clones to the same path both succeed (36 of 100 runs).
+  Fix: open the output with `OpenOptions::new().write(true).create_new(true)`. S12 asserts
+  only the outcome that holds today (at least one succeeds, the file is a valid clone).
+
 ---
 
 ## 2. Fuzzing plan (cargo-fuzz, `fuzz/`)
