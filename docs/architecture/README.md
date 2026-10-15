@@ -42,7 +42,7 @@ Use Node 22.23.2, the version that c4-sdk pins (for example
 
 ```sh
 cd docs/architecture
-npm install          # installs c4-sdk from vendor/c4-sdk-0.1.0-beta.1.tgz
+npm install          # installs c4-sdk from npm
 npm run dev          # local viewer with hot reload
 npm run validate     # decode src/bundle.json with c4-sdk/core; exits 1 on any error (--strict also fails on warnings)
 npm run build        # tsc --noEmit, then vite build into dist/ (base './', works from any sub-path)
@@ -74,17 +74,8 @@ Rules that the SDK enforces and that bite most often:
 
 ## About the c4-sdk package
 
-c4-sdk is **not published to npm**, and its `dist-sdk/` is build output, so you cannot install
-it straight from GitHub. `vendor/c4-sdk-0.1.0-beta.1.tgz` (about 0.9 MB, sha256
-`bfdfaf8c3404e139360d08df07972f33f9e42361d6bc04c034071f98ed704263`) was packed from
-`nickstrad/c4-sdk` commit `eb3b7a5` with Node 22.23.2 / npm 10.9.8. To rebuild it:
-
-```sh
-git clone https://github.com/nickstrad/c4-sdk.git && cd c4-sdk
-npm ci && npm run sdk:build && npm pack
-cp c4-sdk-*.tgz <walflip>/docs/architecture/vendor/
-# if the version changed, update the file: path in package.json, then npm install
-```
+c4-sdk is installed from npm (`c4-sdk@0.1.0`, published from `nickstrad/c4-sdk`). Earlier revisions
+vendored a beta tarball; that is no longer needed.
 
 The SDK's peer dependencies are pinned to `react` and `react-dom` 19.3.0. Keep this app on those
 exact versions.
