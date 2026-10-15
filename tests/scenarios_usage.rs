@@ -112,6 +112,10 @@ fn s4_many_small_dbs() {
     fs::create_dir_all(root.join("decoy")).unwrap();
     fs::write(root.join("decoy").join("notes.txt"), "not a db").unwrap();
     fs::write(root.join("stray-file"), "x").unwrap();
+    // A folder with only a bare live.db is not a walflip db: not listed, nothing created in it.
+    let bare = root.join("bare");
+    fs::create_dir_all(&bare).unwrap();
+    fs::write(bare.join("live.db"), "").unwrap();
 
     let list = h.ok(&["list"]);
     let rows: Vec<(String, u64)> = list
@@ -132,6 +136,11 @@ fn s4_many_small_dbs() {
         fs::read_dir(root.join("decoy")).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into()).collect();
     dir.sort();
     assert_eq!(dir, ["notes.txt"], "INV-46: list/status must not create files in a decoy folder");
+    assert!(!rows.iter().any(|r| r.0 == "bare"), "INV-46: bare live.db folder must not be listed");
+    let mut bare_files: Vec<String> =
+        fs::read_dir(&bare).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into()).collect();
+    bare_files.sort();
+    assert_eq!(bare_files, ["live.db"], "INV-46: list must not create meta.db next to a bare live.db");
 
     for (name, m) in names.iter().zip(&models) {
         assert_invariants(&root, name, Some(m), Checks::full());
@@ -259,5 +268,78 @@ fn s17_read_only_output_dir() {
     assert!(!r.status.success(), "INV-36: clone into a read-only dir succeeded");
     assert!(leftovers.is_empty(), "INV-36: partial files left behind: {leftovers:?}");
     assert_eq!(FileHashes::of(&root.join("kv")), before, "INV-36: db files changed");
+    assert_invariants(&root, "kv", Some(&m), Checks::full());
+}
+
+/// Dispatch point for helper processes; a no-op in a normal run.
+#[test]
+fn helper_process_entry() {
+    common::helpers::entry();
+}
+
+fn is_root() -> bool {
+    let uid = std::process::Command::new("id").arg("-u").output().unwrap();
+    String::from_utf8_lossy(&uid.stdout).trim() == "0"
+}
+
+/// Q11: on a read-only root, `list`, `status`, `log` and `clone` still work, even with a bare
+/// `live.db` folder next to the real databases (skipped when running as root).
+#[test]
+fn s19_read_only_root_read_commands_work() {
+    use std::os::unix::fs::PermissionsExt;
+    if is_root() {
+        eprintln!("skipping S19: running as root, chmod 555 does not restrict writes");
+        return;
+    }
+    let h = Harness::new();
+    let root = h.root();
+    h.create("kv", KV);
+    h.exec("kv", "INSERT INTO kv(id, v) VALUES(1, 'x')");
+    fs::create_dir_all(root.join("bare")).unwrap();
+    fs::write(root.join("bare").join("live.db"), "").unwrap();
+
+    let chmod = |p: &std::path::Path, m| fs::set_permissions(p, fs::Permissions::from_mode(m)).unwrap();
+    for d in [root.join("kv"), root.join("bare"), root.clone()] {
+        chmod(&d, 0o555);
+    }
+    let out = h.path("out.db");
+    let list = h.run(&["list"]);
+    let status = h.run(&["--db", "kv", "status"]);
+    let log = h.run(&["--db", "kv", "log"]);
+    let clone = h.run(&["--db", "kv", "clone", "-n", "1", "-o", out.to_str().unwrap()]);
+    for d in [root.join("kv"), root.join("bare"), root.clone()] {
+        chmod(&d, 0o755);
+    }
+    for (what, r) in [("list", &list), ("status", &status), ("log", &log), ("clone", &clone)] {
+        assert!(r.status.success(), "Q11: {what} failed on a read-only root: {}", String::from_utf8_lossy(&r.stderr));
+    }
+    let l = String::from_utf8_lossy(&list.stdout);
+    assert!(l.contains("kv") && !l.contains("bare"), "Q11: list output: {l}");
+    assert!(out.exists(), "Q11: clone wrote nothing");
+    assert!(!root.join("bare").join("meta.db").exists());
+}
+
+/// Q11: a hot `meta.db-journal` left by a crashed writer does not break `status`/`list`/`log`
+/// (the read-write open rolls it back; `SQLITE_OPEN_READ_ONLY` would fail here).
+#[test]
+fn s20_leftover_meta_journal_does_not_break_reads() {
+    let h = Harness::new();
+    let root = h.root();
+    h.create("kv", KV);
+    let mut m = Model::new(Some(KV));
+    let sql = "INSERT INTO kv(id, v) VALUES(1, 'x')";
+    let n = h.exec("kv", sql);
+    m.exec(sql, n);
+    let d = walflip::db::Db::existing(&root, "kv").unwrap();
+    let f = common::helpers::crash_writer(
+        &d.meta,
+        &["BEGIN IMMEDIATE", "INSERT INTO meta(key, value) VALUES('junk', 'x')"],
+    );
+    assert!(f.status.success() && f.stdout.contains("WROTE 2"), "lock holder: {f:?}");
+
+    let st = h.ok(&["--db", "kv", "status"]);
+    assert!(st.contains("commits   : 1"), "Q11: status after crashed writer: {st}");
+    assert!(h.ok(&["list"]).contains("kv"));
+    h.ok(&["--db", "kv", "log"]);
     assert_invariants(&root, "kv", Some(&m), Checks::full());
 }
