@@ -1,0 +1,5 @@
+CREATE TABLE t(a);
+  INSERT INTO t VALUES(1);  
+
+
+SELECT 1;
