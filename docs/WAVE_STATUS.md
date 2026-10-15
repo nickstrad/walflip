@@ -34,9 +34,7 @@ Open items, all optional (same list as `docs/TESTING_PLAN.md` section 1.6):
 
 | Item | State |
 |---|---|
-| T21 nightly `exec_sql` timeout | `exec_sql` once hit libFuzzer's 30 s timeout in `fsync` on a loaded machine. Fuzz builds now use `SQLITE_NO_SYNC`; watch the nightly `fuzz.yml` runs to confirm it does not come back. |
 | `SQLITE_NO_SYNC` effect | Verified only indirectly (build flag reaches libsqlite3-sys, no timeouts since). No test proves fsync is a no-op in fuzz builds. |
-| Ubuntu 26 runner | CI is pinned to `ubuntu-24.04`. Moving to Ubuntu 26 is a future, deliberate change: bump the pin and watch the first run. |
 | fuzz crate lint | `cargo clippy` covers the main crate only; `fuzz/` is not clippy-linted. |
 | Tests on Rust 1.85 | The library builds on 1.85; tests need 1.88 (`proptest`). Whether the test code compiles on 1.85 with an older `proptest` is untried. |
 | `--script` splitting cost | `exec --script` re-runs `sqlite3_complete` on a growing prefix, so one statement containing many `;` (e.g. a long trigger body or string) splits in quadratic time. Fine for normal scripts. |
@@ -113,3 +111,10 @@ fuzz-only sandbox hook behind the `testing` feature). Triage procedure: `fuzz/RE
 
 Merge-order note: all of W4 shared `src/db.rs`, so tasks ran sequentially, each branching from the
 previous merge.
+
+
+## CI scope
+
+Only the PR/push job (`.github/workflows/ci.yml`: `cargo test`, fuzz build, corpus replay) is active. The
+nightly fuzz workflow was archived to `archive/ci/fuzz-nightly.yml` on request: this is a one-off
+project, not a long-lived tool. Fuzzing is local (`make fuzz`). The runner is pinned to `ubuntu-24.04`.

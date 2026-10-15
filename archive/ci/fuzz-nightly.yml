@@ -1,3 +1,10 @@
+# ARCHIVED, not active. GitHub only runs workflows under .github/workflows/, so this does nothing here.
+# It was the nightly fuzz job: one matrix entry per fuzz target, 300 s each, corpus artifacts uploaded
+# on failure. Removed because this is a one-off project and the PR job (ci.yml: tests + fuzz build +
+# corpus replay) is enough. To revive it, move it back to .github/workflows/fuzz.yml.
+#
+# Things worth studying here: the target matrix, LIBSQLITE3_FLAGS=-DSQLITE_NO_SYNC (fuzz-only, avoids
+# fsync stalls), -rss_limit_mb/-timeout limits, and uploading fuzz/artifacts on failure.
 name: fuzz-nightly
 on:
   schedule:

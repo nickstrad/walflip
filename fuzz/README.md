@@ -15,7 +15,7 @@ only) adds pragma/function denials, length/depth limits, `SQLITE_LIMIT_ATTACHED=
 
 Fuzz builds compile the bundled SQLite with `LIBSQLITE3_FLAGS=-DSQLITE_NO_SYNC` (read by
 libsqlite3-sys 0.30's build script), so fsync is a no-op; `exec_sql` otherwise hit the 30 s
-libFuzzer timeout stuck in fsync on a loaded machine. The Makefile fuzz targets, `fuzz.yml` and the
+libFuzzer timeout stuck in fsync on a loaded machine. The Makefile fuzz targets and the
 `fuzz-build-replay` CI job set it; plain `cargo test`/release builds do not. Crash safety is not
 under test here, only logic, so durability is irrelevant. If you run `cargo +nightly fuzz` by hand,
 export it yourself: `export LIBSQLITE3_FLAGS=-DSQLITE_NO_SYNC`. Changing it rebuilds libsqlite3-sys.
@@ -23,7 +23,8 @@ export it yourself: `export LIBSQLITE3_FLAGS=-DSQLITE_NO_SYNC`. Changing it rebu
     make fuzz FUZZ_SECS=60      # all targets, nightly + cargo-fuzz required
     make fuzz-replay            # replay committed corpora (-runs=0)
 
-CI: `ci.yml` builds targets and replays corpora on every PR; `fuzz.yml` runs each target 300 s nightly (5 targets in parallel matrix; wall time ~6 min, ~25 min total CPU budget).
+CI: `ci.yml` builds targets and replays corpora on every PR. There is no nightly fuzz job; the old
+one is archived in `archive/ci/fuzz-nightly.yml` for reference. Fuzz locally with `make fuzz`.
 Use `-max_len=70000` for `wal_parse` and `-dict=fuzz/wal.dict`.
 
 ## Regression-test procedure for a crash
