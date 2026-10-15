@@ -66,6 +66,71 @@ pub fn parse_statements(text: &str) -> Vec<String> {
     text.lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect()
 }
 
+/// Split an SQL script into statements the way the `sqlite3` shell does (plan Q5, `exec
+/// --script`): a statement ends at the first `;` where SQLite's own `sqlite3_complete` says the
+/// text so far is complete, so a `;` inside a string, quoted identifier, comment or `CREATE
+/// TRIGGER ... BEGIN ... END;` body does not split. Each statement is returned with its `;`,
+/// without surrounding whitespace or leading comments. Chunks that are only whitespace,
+/// comments or a bare `;` are skipped.
+///
+/// Errors (and returns no statements, so nothing runs) if text remains after the last complete
+/// statement that is not just whitespace/comments: that statement has no terminating `;`
+/// (`incomplete input`). Also errors on a NUL byte, which SQLite cannot see past.
+pub fn split_script(text: &str) -> Result<Vec<String>> {
+    if text.contains('\0') {
+        bail!("script contains a NUL byte");
+    }
+    let mut out = Vec::new();
+    let mut start = 0;
+    for (i, _) in text.match_indices(';') {
+        let chunk = skip_blank(&text[start..=i]);
+        if is_complete(chunk) {
+            if chunk != ";" {
+                out.push(chunk.to_string());
+            }
+            start = i + 1;
+        }
+    }
+    let tail = skip_blank(&text[start..]);
+    if !tail.is_empty() {
+        let line = text[..text.len() - tail.len()].matches('\n').count() + 1;
+        let head: String = tail.chars().take(60).collect();
+        bail!(
+            "incomplete input: the script ends with a statement that has no terminating `;` \
+             (line {line}: {head}); nothing was run"
+        );
+    }
+    Ok(out)
+}
+
+/// SQLite's `sqlite3_complete`: `s` ends with a `;` that ends a statement (not one inside a
+/// string, comment or unfinished `CREATE TRIGGER`). False if `s` contains a NUL byte.
+pub fn is_complete(s: &str) -> bool {
+    let Ok(c) = std::ffi::CString::new(s) else { return false };
+    // SAFETY: `c` is a valid NUL-terminated string that outlives the call.
+    unsafe { rusqlite::ffi::sqlite3_complete(c.as_ptr()) != 0 }
+}
+
+/// `s` without leading whitespace and SQL comments (`-- ...` to end of line, `/* ... */`). An
+/// unterminated `/*` is kept, so a script ending inside one is `incomplete input`, not silently
+/// dropped.
+/// Whitespace is what `sqlite3_complete` treats as whitespace.
+fn skip_blank(s: &str) -> &str {
+    fn ws(s: &str) -> &str {
+        s.trim_start_matches([' ', '\t', '\n', '\r', '\x0C'])
+    }
+    let mut s = ws(s);
+    loop {
+        if let Some(r) = s.strip_prefix("--") {
+            s = ws(r.find('\n').map_or("", |i| &r[i + 1..]));
+        } else if let Some(i) = s.strip_prefix("/*").and_then(|r| r.find("*/")) {
+            s = ws(&s[i + 4..]);
+        } else {
+            return s;
+        }
+    }
+}
+
 pub struct Created {
     pub page_size: u32,
 }
@@ -587,6 +652,16 @@ pub struct LogEntry {
     pub sql: String,
 }
 
+/// Characters of a label that `log` prints.
+pub const LOG_LABEL_CHARS: usize = 90;
+
+/// A stored label as `log` displays it, on one line: each line break (`\r\n`, `\n` or `\r`) is
+/// shown as the two characters `\n`, then the result is cut to [`LOG_LABEL_CHARS`] characters.
+/// Display only: the stored label is unchanged.
+pub fn display_label(sql: &str) -> String {
+    sql.replace("\r\n", "\n").replace(['\n', '\r'], "\\n").chars().take(LOG_LABEL_CHARS).collect()
+}
+
 /// Commits in ascending order. `from_end` selects the last `limit` commits instead of the first.
 pub fn log(db: &Db, limit: u64, from_end: bool) -> Result<Vec<LogEntry>> {
     let store = Store::open_existing(&db.meta)?;
@@ -975,5 +1050,98 @@ mod tests {
             vec!["INSERT 1;".to_string(), "UPDATE 2;".to_string()]
         );
         assert!(parse_statements("").is_empty());
+    }
+
+    fn split(s: &str) -> Vec<String> {
+        split_script(s).unwrap()
+    }
+
+    #[test]
+    fn script_splits_on_statement_ending_semicolons_only() {
+        assert!(split("").is_empty());
+        assert!(split("  \n-- only a comment\n/* and ; a block */\n;;\n").is_empty());
+        assert_eq!(split("INSERT INTO t VALUES(1);INSERT INTO t VALUES(2);"), ["INSERT INTO t VALUES(1);", "INSERT INTO t VALUES(2);"]);
+        // `;` inside strings, quoted identifiers and comments does not split.
+        assert_eq!(
+            split("INSERT INTO t VALUES('a;b', \"c;\", [d;], `e;`); -- trailing; comment\n"),
+            ["INSERT INTO t VALUES('a;b', \"c;\", [d;], `e;`);"]
+        );
+        assert_eq!(split("SELECT 1 /* x; y */ ;"), ["SELECT 1 /* x; y */ ;"]);
+        assert_eq!(split("SELECT 1 -- x; y\n;"), ["SELECT 1 -- x; y\n;"]);
+        // Leading comments and whitespace are dropped from the statement.
+        assert_eq!(split("-- note; here\n /* c; */\n\tVACUUM;\n"), ["VACUUM;"]);
+        // A multi-line INSERT and a trigger with `;` inside BEGIN..END are one statement each.
+        let trig = "CREATE TRIGGER tr AFTER INSERT ON t BEGIN\n  INSERT INTO log VALUES(new.v);\n  UPDATE c SET n = n + 1;\nEND;";
+        let ins = "INSERT INTO t(v)\nVALUES\n  ('x;'),\n  ('y');";
+        assert_eq!(split(&format!("{trig}\n\n{ins}\n")), [trig, ins]);
+    }
+
+    #[test]
+    fn script_with_unterminated_tail_is_incomplete_input() {
+        for s in [
+            "INSERT INTO t VALUES(1);\nINSERT INTO t VALUES(2)",
+            "SELECT 'unterminated; string;",
+            "CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT 1; END",
+            "SELECT 1;\n/* unterminated; comment",
+            "x",
+        ] {
+            let e = format!("{:#}", split_script(s).unwrap_err());
+            assert!(e.contains("incomplete input"), "{s:?}: {e}");
+        }
+        let e = format!("{:#}", split_script("SELECT 1;\n\nSELECT\n2").unwrap_err());
+        assert!(e.contains("line 3"), "{e}");
+        assert!(split_script("SELECT 1;\0").is_err());
+    }
+
+    #[test]
+    fn script_of_2000_statements() {
+        let script: String = (0..2000).map(|i| format!("INSERT INTO t\n  VALUES({i}, 'a;{i}');\n")).collect();
+        let stmts = split(&script);
+        assert_eq!(stmts.len(), 2000);
+        assert_eq!(stmts[1999], "INSERT INTO t\n  VALUES(1999, 'a;1999');");
+    }
+
+    /// A statement drawn from pieces that hide `;` from a naive splitter.
+    fn arb_statement() -> impl Strategy<Value = String> {
+        let piece = prop_oneof![
+            Just("SELECT 1".to_string()),
+            "[a-z;' ]{0,8}".prop_map(|s| format!("'{}'", s.replace('\'', "''"))),
+            "[a-z; ]{0,8}".prop_map(|s| format!("\"{s}\"")),
+            "[a-z; ]{0,8}".prop_map(|s| format!("/*{s}*/")),
+            "[a-z; ]{0,8}".prop_map(|s| format!("--{s}\n")),
+            Just("\n".to_string()),
+        ];
+        proptest::collection::vec(piece, 0..6).prop_map(|ps| format!("SELECT {};", ps.join(" ")))
+    }
+
+    proptest! {
+        #[test]
+        fn script_round_trips_generated_statements(
+            stmts in proptest::collection::vec(arb_statement(), 0..8),
+            sep in "[ \n\t]{0,3}(--[a-z; ]{0,5}\n|/\\*[a-z; ]{0,5}\\*/)?[ \n]{0,2}",
+        ) {
+            let got = split(&stmts.iter().map(|s| format!("{sep}{s}")).collect::<String>());
+            prop_assert_eq!(got, stmts);
+        }
+
+        #[test]
+        fn script_split_is_complete_and_idempotent(text in "[a-zA-Z0-9 ;'\"`\\[\\]\n*/-]{0,60}") {
+            if let Ok(stmts) = split_script(&text) {
+                for s in &stmts {
+                    prop_assert!(is_complete(s), "{:?}", s);
+                }
+                prop_assert_eq!(split(&stmts.join("\n")), stmts);
+            }
+        }
+    }
+
+    #[test]
+    fn log_labels_are_one_line_and_cut() {
+        assert_eq!(display_label("CREATE TABLE u(\n  a\r\n);\r"), "CREATE TABLE u(\\n  a\\n);\\n");
+        let long = format!("SELECT\n{}", "x".repeat(200));
+        let d = display_label(&long);
+        assert_eq!(d.chars().count(), LOG_LABEL_CHARS);
+        assert!(d.starts_with("SELECT\\nxxx") && !d.contains('\n'));
+        assert_eq!(display_label("short"), "short");
     }
 }
