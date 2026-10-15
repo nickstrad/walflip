@@ -236,3 +236,102 @@ fn failed_batch_reports_commits_captured_before_it() {
     let err = db::exec(&d, &["INSERT INTO nope VALUES(1)".into()]).unwrap_err();
     assert!(err.downcast_ref::<db::ExecFailed>().is_none());
 }
+
+/// Multi-line DDL batch for the Q5 `exec --script` tests: a multi-line CREATE TABLE, a trigger
+/// whose body has `;`, a multi-line INSERT and a `;` inside a string, with comments around them.
+const SCRIPT: &str = "-- schema change; then data\n\
+CREATE TABLE u(\n  a INTEGER\n);\n\
+CREATE TRIGGER tu AFTER INSERT ON t BEGIN\n  INSERT INTO u(a) VALUES(new.id);\nEND;\n\
+/* two rows; one statement */\n\
+INSERT INTO t(v)\nVALUES\n  ('x;y'),\n  ('z');\n\
+INSERT INTO t(v) VALUES('w'); -- trailing comment;\n";
+
+/// Create `name` through the CLI with one seed commit; returns the model so far.
+fn seeded(h: &Harness, name: &str) -> Model {
+    let mut m = Model::new(Some(SCHEMA));
+    h.create(name, SCHEMA);
+    m.exec(&ins("seed"), h.exec(name, &ins("seed")));
+    m
+}
+
+/// INV-50 / Q5: the same multi-line batch fails line by line (`exec -`) but runs with
+/// `exec --script` (stdin or a file): one commit per `;`-terminated statement, in order, each
+/// labelled with its statement text.
+#[test]
+fn s10_script_mode_runs_multi_line_ddl_batch() {
+    let stmts = db::split_script(SCRIPT).unwrap();
+    assert_eq!(stmts.len(), 4);
+    let h = Harness::new();
+
+    let lines_model = seeded(&h, "lines");
+    let o = h.with_stdin(&["--db", "lines", "exec", "-"], SCRIPT);
+    assert!(!o.status.success());
+    assert!(String::from_utf8_lossy(&o.stderr).contains("incomplete input"), "line mode should fail");
+    assert_invariants(&h.root(), "lines", Some(&lines_model), Checks::full());
+
+    let file = h.path("batch.sql");
+    std::fs::write(&file, SCRIPT).unwrap();
+    for (name, source) in [("stdin", "-"), ("file", file.to_str().unwrap())] {
+        let mut m = seeded(&h, name);
+        let o = h.with_stdin(&["--db", name, "exec", "--script", source], SCRIPT);
+        assert!(o.status.success(), "[{name}] {}", String::from_utf8_lossy(&o.stderr));
+        assert_eq!(parse_captured(&String::from_utf8(o.stdout).unwrap()), 4, "[{name}]");
+        for s in &stmts {
+            m.exec(s, 1);
+        }
+        let obs = assert_invariants(&h.root(), name, Some(&m), Checks::full());
+        let labels: Vec<&String> = obs.log.iter().skip(1).map(|r| &r.sql).collect();
+        assert_eq!(labels, stmts.iter().collect::<Vec<_>>(), "[{name}] labels are the statements");
+    }
+
+    assert!(h.err(&["--db", "stdin", "exec", "--script", "-", "SELECT 1"]).contains("cannot be used"));
+    assert!(h.err(&["--db", "stdin", "exec"]).contains("required"));
+}
+
+/// Q5: a script whose last statement has no `;` is rejected before anything runs.
+#[test]
+fn s10_script_unterminated_tail_runs_nothing() {
+    let h = Harness::new();
+    let m = seeded(&h, "tail");
+    let o = h.with_stdin(&["--db", "tail", "exec", "--script", "-"], &format!("{};\n{}\n", ins("1"), ins("2")));
+    assert!(!o.status.success());
+    let err = String::from_utf8(o.stderr).unwrap();
+    assert!(err.contains("incomplete input") && err.contains("line 2"), "{err}");
+    let obs = assert_invariants(&h.root(), "tail", Some(&m), Checks::full());
+    assert_eq!(obs.commits, 1, "nothing from the script ran");
+}
+
+/// Q5: per-statement atomicity as in line mode: a failing statement stops the script, earlier
+/// statements stay committed and captured, later ones never run.
+#[test]
+fn s10_script_failing_statement_stops_batch() {
+    let h = Harness::new();
+    let mut m = seeded(&h, "stop");
+    let text = format!("{};\nINSERT INTO nope\n  VALUES(1);\n{};\n", ins("1"), ins("2"));
+    let o = h.with_stdin(&["--db", "stop", "exec", "--script", "-"], &text);
+    assert!(!o.status.success());
+    let err = String::from_utf8(o.stderr).unwrap();
+    assert!(err.contains("no such table: nope") && err.contains("statement 2 failed"), "{err}");
+    m.exec(&format!("{};", ins("1")), 1);
+    let obs = assert_invariants(&h.root(), "stop", Some(&m), Checks::full());
+    assert_eq!(obs.commits, 2);
+}
+
+/// `log` shows a multi-line label on one row, line breaks as `\n`; the stored label is unchanged.
+#[test]
+fn log_shows_multi_line_labels_on_one_row() {
+    let h = Harness::new();
+    seeded(&h, "lg");
+    let o = h.with_stdin(&["--db", "lg", "exec", "--script", "-"], "CREATE TABLE u(\n  a INTEGER\n);\n");
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    h.exec("lg", "INSERT INTO t(v)\r\nVALUES('crlf')");
+    let out = h.ok(&["--db", "lg", "log"]);
+    let rows: Vec<&str> = out.lines().collect();
+    assert_eq!(rows.len(), 4, "header + 3 commits, one line each:\n{out}");
+    assert!(rows[2].ends_with("  CREATE TABLE u(\\n  a INTEGER\\n);"), "{out}");
+    assert!(rows[3].ends_with("  INSERT INTO t(v)\\nVALUES('crlf')"), "{out}");
+    let stored: Vec<String> =
+        db::log(&Db::existing(&h.root(), "lg").unwrap(), 10, false).unwrap().into_iter().map(|e| e.sql).collect();
+    assert_eq!(stored[1], "CREATE TABLE u(\n  a INTEGER\n);");
+    assert_eq!(stored[2], "INSERT INTO t(v)\r\nVALUES('crlf')");
+}

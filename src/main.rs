@@ -36,8 +36,16 @@ enum Cmd {
     /// Delete a database folder (live, base and meta files)
     Drop { name: String },
     /// Run SQL against --db; each statement is one transaction. Use `-` to read
-    /// one statement per line from stdin.
-    Exec { sql: String },
+    /// one statement per line from stdin, or --script for `;`-terminated, multi-line SQL.
+    Exec {
+        #[arg(required_unless_present = "script")]
+        sql: Option<String>,
+        /// Run an SQL script file (`-` reads stdin) instead: statements end with `;` and may span
+        /// lines (split as the sqlite3 shell does). A statement without its `;` at the end of
+        /// the script is `incomplete input` and nothing runs.
+        #[arg(long, conflicts_with = "sql")]
+        script: Option<PathBuf>,
+    },
     /// List captured commits for --db: the most recent --limit, oldest first
     Log {
         /// How many commits to show (0 shows none, only the header)
@@ -72,7 +80,7 @@ fn main() -> Result<()> {
     match cli.cmd {
         Cmd::Create { name, schema } => {
             let d = Db::new(&root, &name)?;
-            let sql = schema.as_deref().map(read_schema).transpose()?;
+            let sql = schema.as_deref().map(|p| read_sql(p, "schema")).transpose()?;
             let c = db::create(&d, sql.as_deref())?;
             println!("created {} (page size {})", d.dir.display(), c.page_size);
         }
@@ -96,13 +104,12 @@ fn main() -> Result<()> {
             db::drop_db(&d)?;
             println!("dropped {}", d.dir.display());
         }
-        Cmd::Exec { sql } => {
-            let stmts = if sql == "-" {
-                let mut text = String::new();
-                std::io::stdin().read_to_string(&mut text)?;
-                db::parse_statements(&text)
-            } else {
-                vec![sql]
+        Cmd::Exec { sql, script } => {
+            let stmts = match (script, sql) {
+                (Some(path), _) => db::split_script(&read_sql(&path, "script")?)?,
+                (None, Some(sql)) if sql == "-" => db::parse_statements(&read_sql(Path::new("-"), "stdin")?),
+                (None, Some(sql)) => vec![sql],
+                (None, None) => unreachable!("clap requires sql or --script"),
             };
             let r = db::exec_with(&open()?, &stmts, walflip::store::DEFAULT_BUSY_TIMEOUT)?;
             if r.recovered > 0 {
@@ -119,8 +126,7 @@ fn main() -> Result<()> {
             let (limit, from_end) = if all { (i64::MAX as u64, false) } else { (limit, !head) };
             println!("{:>5} {:>6} {:>8}  sql", "n", "frames", "db_pages");
             for e in db::log(&open()?, limit, from_end)? {
-                let sql: String = e.sql.chars().take(90).collect();
-                println!("{:>5} {:>6} {:>8}  {sql}", e.n, e.frames, e.db_pages);
+                println!("{:>5} {:>6} {:>8}  {}", e.n, e.frames, e.db_pages, db::display_label(&e.sql));
             }
         }
         Cmd::Status => {
@@ -145,13 +151,14 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn read_schema(path: &Path) -> Result<String> {
+/// Read an SQL file, or stdin for `-`; `what` names it in errors.
+fn read_sql(path: &Path, what: &str) -> Result<String> {
     if path == Path::new("-") {
         let mut text = String::new();
         std::io::stdin().read_to_string(&mut text)?;
         Ok(text)
     } else {
-        std::fs::read_to_string(path).with_context(|| format!("reading schema {}", path.display()))
+        std::fs::read_to_string(path).with_context(|| format!("reading {what} {}", path.display()))
     }
 }
 
