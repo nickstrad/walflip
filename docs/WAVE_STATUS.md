@@ -12,20 +12,25 @@ everything so a fresh session can continue.
 | W2 | T03 `Scenario`/`Step`/`Driver`, T09 store tests, T10 WAL parser tests, T17 `wal_differential`, T18 `replay_apply`/`store_capture`/`statements_split` fuzz targets | merged |
 | W3 | T04 CLI scenarios, T05 usage S2/S3/S4/S5/S8/S16/S17, T06 DDL S6/S7, T07 schema matrix S18, T08 library S9/S11/INV-23, T12 concurrency S12-S15, T19 fuzz seed corpus, T22 perf smoke + README | merged |
 | W4 | T13 B1 quoting + B9 clone race, T15 schema-before-WAL + authorizer (B5/B7/B8, Q7/Q8), T14 reject transaction control (B2, Q2), T16 writer lock + `(recovered)` pre-capture (B4/B3, Q1), T24 incremental capture (INV-51), T20 CI workflows, Q9 `log` default | merged |
+| W5 | T23 final review: re-ran everything and reconciled the plan's status cells (INV, S1-S20, T01-T24) with the tests. Results are at the top of `docs/TESTING_PLAN.md`. | docs only; found B10 |
 | extra | `docs/architecture/` C4 viewer built with c4-sdk | `cd docs/architecture && npm install && npm run dev` (Node 22.23.2) |
 
 ## Defects
 
-All defects B1-B9 from the plan are fixed. Open items:
+Defects B1-B9 from the plan are fixed, each with a regression test. T23 found B10, which is
+open. Open items (the same list as `docs/TESTING_PLAN.md` section 1.6):
 
 | Item | State |
 |---|---|
-| INV-08 | WAL page size above 65536 is accepted. `#[ignore]`d unit test, harmless (zero frames fit). Decide: adopt the upper bound or document. |
-| CI lint | `.github/workflows/*.yml` and `fuzz/README.md` were never linted (`actionlint` not installed when written). Run `actionlint .github/workflows/*.yml`. |
+| B10 / INV-63 | `clone -o` to a path containing `?`, `#` or `%` writes the file, then exits 1: `db::summarize` puts the raw path into `file:{path}?immutable=1`. Low severity; documented in README Limitations. Fix in `src/db.rs`, with an e2e test. |
+| INV-08 | WAL page size above 65536 is accepted. `#[ignore]`d unit test that fails; harmless (zero frames fit). Decide: adopt the upper bound or document. |
+| INV-58 (exec side), INV-56, INV-60 | Partial coverage: the `exec` refusal on a non-WAL `live.db` is untested; empty schema vs no schema is not byte-compared; `base.db` sidecars and journal mode are not asserted. |
+| CI lint | `.github/workflows/*.yml` were never linted: `actionlint` was not installed for T20 or T23. Both files parse as YAML. Run `actionlint .github/workflows/*.yml`, and watch the first CI run. |
 | Q4 | `exec VACUUM` still errors (no library entry point either). Undecided; needs its own bypass of the transaction-control denial (`VACUUM INTO` trips SQLITE_TRANSACTION). |
-| Q5, Q6, Q11 | Line-based `exec -` splitting, sector-padding duplicate commit frames, read-only `list`/`status`: undecided, unchanged from plan section 5. |
-| T21 | Sandboxed schema-text fuzz target. Unblocked by Q8 (authorizer exists) but not started. |
-| T23 | Final review task, not started. |
+| Q5, Q6 (INV-10), Q11 | Line-based `exec -` splitting, sector-padding duplicate commit frames, and read-only `list`/`status` are undecided, unchanged from plan section 5. No test models real SQLite padding frames. |
+| T21 | Sandboxed schema-text fuzz target. Unblocked by Q8 (the authorizer exists) but not started. |
+| clippy | 5 warnings (style lints in lib, lib tests and `scenarios_failure`), 0 errors. |
+| fuzz corpus hygiene | `make fuzz` writes new inputs into `fuzz/corpus/<target>`, leaving untracked files in the checkout. Minimise them with `cmin` before committing any, or point local runs at a scratch corpus. |
 
 Known limits (documented, by design):
 - A writer that does not use walflip's locks can commit between a statement's commit and its capture. `exec` captures everything and fails with "statement produced N commits".
@@ -36,8 +41,17 @@ Known limits (documented, by design):
 
 ```sh
 export PATH="/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:$PATH"
-cargo test --features testing        # 129+ pass, ignored: INV-08, perf per-process, fuzz_seed generator
+cargo test --features testing        # 130 pass, 3 ignored (INV-08, perf per-process, fuzz_seed generator)
+cargo test --features testing --no-fail-fast -- --ignored   # INV-08 fails (expected); the other 2 pass
 cargo +nightly fuzz build
+make fuzz-replay                     # all 5 corpora, -runs=0
+```
+
+The `fuzz_seed` generator writes into `fuzz/corpus` unless `WALFLIP_SEED_OUT` is set, so set it
+to a scratch dir when you run `--ignored` (as `scripts/fuzz-seed.sh` does):
+
+```sh
+WALFLIP_SEED_OUT=$(mktemp -d) cargo test --features testing --no-fail-fast -- --ignored
 ```
 
 Per-suite commands (`--features testing --test <name>`):

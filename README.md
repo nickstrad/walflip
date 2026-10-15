@@ -14,7 +14,8 @@ Typical uses:
 
 ## Install
 
-Requires a Rust toolchain (1.75+) and a Unix-like OS. SQLite is bundled.
+Requires a Rust toolchain (1.85+, the minimum for the `clap` version in `Cargo.lock`) and a
+Unix-like OS. SQLite is bundled.
 
 ```sh
 git clone https://github.com/nickstrad/walflip.git
@@ -48,15 +49,22 @@ Every `exec` statement is one transaction and one commit. `clone -n N` replays t
 | `list` | List databases and their commit counts. |
 | `rename <old> <new>` | Rename a database; history is preserved. |
 | `drop <name>` | Delete a database and its history. |
-| `exec <sql>` / `exec -` | Run a statement, or read one statement per line from stdin. Each statement is its own commit. |
+| `exec <sql>` / `exec -` | Run a statement, or read one statement per line from stdin (a statement that spans lines fails with `incomplete input`). Each statement is its own commit. Statements before a failing one stay committed and captured. |
 | `log [--limit N] [--head] [--all]` | Show captured commits (frames written, database size in pages, SQL), oldest first. Default: the most recent 20. `--head` shows the first N instead; `--all` shows everything; `--limit 0` shows only the header. `--head` and `--all` conflict. |
-| `status` | Page size, commit and frame counts, whether a live WAL exists. |
+| `status` | Page size, commit and frame counts, and whether a live WAL exists. If the WAL holds commits that are not in history yet, it also prints `uncaptured: N`. |
 | `clone -n N -o <file>` | Write the database as of commit `N` to `<file>`, then run `integrity_check` and print row counts. `-n 0` is the initial snapshot. |
 
-The schema file may contain any SQL: several tables, indexes, triggers, and seed rows. Whatever
-it produces is the initial snapshot, so `clone -n 0` returns it and history starts after it. If
-the schema fails to apply, nothing is left on disk. Later schema changes made with
-`exec "CREATE TABLE ..."` or `ALTER TABLE` are captured like any other statement.
+The schema file may contain SQL such as tables, indexes, triggers, views, seed rows and
+`BEGIN`/`COMMIT`. Whatever it produces is the initial snapshot, so `clone -n 0` returns it and
+history starts after it. The schema runs before WAL mode is switched on, so `PRAGMA page_size`
+and `PRAGMA auto_vacuum` in it take effect. If the schema fails to apply, or leaves a `BEGIN`
+open, nothing is left on disk. Later schema changes made with `exec "CREATE TABLE ..."` or
+`ALTER TABLE` are captured like any other statement.
+
+Statements that walflip refuses (in the schema and in `exec`): `ATTACH`, `DETACH` and
+`PRAGMA journal_mode`. `exec` also refuses transaction control (`BEGIN`, `COMMIT`, `END`,
+`ROLLBACK`), because every statement already runs in its own transaction. `SAVEPOINT` is
+allowed. `exec VACUUM` fails as well.
 
 ### Selecting a database
 
@@ -86,11 +94,14 @@ walflip-data/
 
 ## How it works
 
-1. `exec` opens `live.db` with automatic checkpointing disabled and runs the statement in
-   a transaction.
-2. Before the connection closes, walflip parses `live.db-wal` directly: header, salts,
+1. `exec` opens `live.db` with automatic checkpointing disabled. For each statement it takes
+   the history write lock (`BEGIN IMMEDIATE` on `meta.db`) and then the `live.db` write lock.
+   It runs the statement in its own transaction and commits it.
+2. Still holding the history lock, walflip parses `live.db-wal` directly: header, salts,
    per-frame checksum chain, and commit markers. A frame whose `db_size` field is non-zero
-   ends a transaction.
+   ends a transaction. Commits that were already in the WAL before the statement ran (for
+   example, from a writer that crashed) are stored first under the label `(recovered)`, with a
+   warning, so they are never attributed to the statement.
 3. Each commit's frames (page number and full page image) are stored in `meta.db`. A cursor
    of WAL salts and commits seen makes capture idempotent and survives WAL restarts. It also
    keeps the byte offset and running checksum of the last captured commit, so each capture
@@ -103,9 +114,14 @@ with no SQL involved.
 
 ## Limitations
 
-- **All writes must go through `walflip exec`.** Changes made to `live.db` by other
-  programs are not captured, and a checkpoint by another writer can discard WAL frames
-  before walflip reads them.
+- **Writes should go through `walflip exec`.** Several `walflip exec` processes may run
+  against one database at the same time: the locks serialise them, and each statement is
+  captured exactly once under its own text. Commits that another program leaves in
+  `live.db-wal` are captured by the next `exec` as `(recovered)`, without their SQL. If the
+  other program checkpoints and restarts the WAL first, those changes are in `live.db` but
+  are lost from history. If it commits between a walflip statement's commit and its capture,
+  that `exec` fails with `statement produced N commits` (all of them are captured).
+- **`exec -` splits on newlines**, not on `;`. A statement must fit on one line.
 - **History is page-level.** The WAL contains pages, not statements. The `sql` shown by
   `log` is the statement you ran, recorded alongside the commit.
 - **A statement that changes nothing is not a commit.** SQLite writes no frames for an
@@ -117,15 +133,22 @@ with no SQL involved.
   database. Cloning an early commit of a long-lived database is cheap; cloning the latest commit
   of a heavily rewritten one may need several times the database size.
 - Page size is fixed at `create`; changing it afterwards is rejected at capture time.
+- `clone -o` paths must not contain `?`, `#` or `%` (known bug B10). The file is written,
+  but the integrity report that follows fails, and `clone` exits 1.
 
 ## Development
 
 ```sh
-make test      # unit, property and end-to-end tests
-make fuzz      # coverage-guided fuzzing of the WAL parser (nightly + cargo-fuzz)
-make demo      # build, seed a 500-commit database from `ps` output, clone at 250 and 500
-make clean     # remove walflip-data/ and demo clones
+make test         # cargo test --features testing: unit, property and end-to-end tests
+make fuzz         # 30 s per fuzz target (FUZZ_SECS=N to change); nightly + cargo-fuzz
+make fuzz-replay  # replay the committed corpora once (-runs=0), as CI does
+make demo         # build, seed a 500-commit database from `ps` output, clone at 250 and 500
+make clean        # remove walflip-data/ and demo clones
 ```
+
+The test suites need the `testing` feature, which exposes the reference WAL encoder
+(`wal::encode`). A normal `cargo build` leaves the encoder out. Run one suite with
+`cargo test --features testing --test <name>`. `docs/WAVE_STATUS.md` lists the suites.
 
 Layout:
 
@@ -137,17 +160,34 @@ Layout:
 | `src/db.rs` | Database operations and name validation; return data, never print |
 | `src/main.rs` | CLI: argument parsing and output only |
 
-Tests:
+Tests (130 run by default, about 6 s of test time in a debug build after compiling). Every invariant they check is
+catalogued in `docs/TESTING_PLAN.md`, section 1:
 
-- **Property tests** (`proptest`) cover the WAL parser with a reference encoder: round-trip in
-  both byte orders, truncation yields a prefix of commits, any single-byte corruption never
-  admits altered data, arbitrary bytes never panic. Replay is checked against a page-map
-  model for last-writer-wins, composition and idempotence.
-- **Fuzzing** (`fuzz/`, cargo-fuzz) runs `wal::parse` on raw bytes, seeded with real WAL files,
-  asserting it never panics and only accepts internally consistent WALs.
+- **Unit and property tests** (`src/*.rs`) cover the WAL parser with a reference encoder:
+  round-trip in both byte orders, truncation gives a prefix of commits, a corrupted byte never
+  admits altered data, stale salts and broken checksum chains end parsing, and resumed parsing
+  equals a full parse. Replay is checked against a page-map model and an allocation bound.
+  Store capture is checked for idempotence, growth, WAL restarts, page-size mismatch and
+  atomic failure.
+- **Scenario tests** (`tests/scenarios_*.rs`, `tests/cli.rs`, `tests/library.rs`) run scripted
+  steps through the CLI binary and through the library. After every step they check the
+  structure of `meta.db`, `log`/`status` consistency, every `clone -n k` against a shadow
+  SQLite model, `clone` of the last commit against `live.db` byte for byte, and that cloning
+  changes no file. The steps cover DDL and quoted table names, schema files, large blobs,
+  external `VACUUM`, failed statements, rename and drop, env vs flags, and concurrency:
+  parallel clones, parallel `exec`, a held reader, a writer killed mid-life, and a lock holder
+  that dies.
 - **Round-trip tests** (`tests/roundtrip.rs`) run random insert/update/delete sequences on a
   real database and assert that `clone -n k` equals the live contents after step *k*.
-- **End-to-end tests** (`tests/cli.rs`) drive the compiled binary through: the full
-  lifecycle, schema files (multi-table, seed rows, stdin), stdin batches with time travel to
-  every commit, environment-based configuration, multiple isolated databases, accident recovery, one-process-per-statement
-  versus batch equivalence, error handling, no-op statements, and the seed script.
+- **Perf smoke** (`tests/perf.rs`): a 2000-statement stdin batch (default). Run the
+  2000-process variant with `-- --ignored --nocapture`.
+- **Fuzzing** (`fuzz/`, cargo-fuzz, 5 targets): `wal_parse` (raw bytes), `wal_differential`
+  (encoder plus mutations, differential against the input), `replay_apply`, `store_capture`
+  (real SQLite I/O) and `statements_split`. CI builds the targets and replays the committed
+  corpora on every PR, and fuzzes each target for 5 minutes nightly. `fuzz/README.md` describes
+  crash triage. A local `make fuzz` adds new inputs to `fuzz/corpus/`; minimise them before
+  committing (`cargo +nightly fuzz cmin <target>`).
+
+Known gaps: `cargo test -- --ignored` includes one red test,
+`wal::tests::inv08_page_size_above_65536_is_rejected` (the parser accepts page sizes above
+65536; this is harmless). `docs/TESTING_PLAN.md` section 1.6 lists the remaining open items.
