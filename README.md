@@ -64,7 +64,13 @@ open, nothing is left on disk. Later schema changes made with `exec "CREATE TABL
 Statements that walflip refuses (in the schema and in `exec`): `ATTACH`, `DETACH` and
 `PRAGMA journal_mode`. `exec` also refuses transaction control (`BEGIN`, `COMMIT`, `END`,
 `ROLLBACK`), because every statement already runs in its own transaction. `SAVEPOINT` is
-allowed. `exec VACUUM` fails as well.
+allowed.
+
+`exec VACUUM` is supported: a statement that is exactly `VACUUM` or `VACUUM main` (any case,
+optional trailing `;`) runs outside a transaction and is captured as one commit, so `log` shows
+`db_pages` shrinking there. Anything else that starts with `VACUUM` is refused before anything
+runs: `VACUUM INTO` (no file is created), another schema, or more SQL after it in the same
+statement (`VACUUM; DROP TABLE t` is one statement, so it is refused as a whole).
 
 ### Selecting a database
 
@@ -96,7 +102,9 @@ walflip-data/
 
 1. `exec` opens `live.db` with automatic checkpointing disabled. For each statement it takes
    the history write lock (`BEGIN IMMEDIATE` on `meta.db`) and then the `live.db` write lock.
-   It runs the statement in its own transaction and commits it.
+   It runs the statement in its own transaction and commits it. `VACUUM` is the exception:
+   after the recovery step below, walflip releases the `live.db` transaction and runs `VACUUM`
+   in autocommit, still under the history lock.
 2. Still holding the history lock, walflip parses `live.db-wal` directly: header, salts,
    per-frame checksum chain, and commit markers. A frame whose `db_size` field is non-zero
    ends a transaction. Commits that were already in the WAL before the statement ran (for
@@ -121,6 +129,14 @@ with no SQL involved.
   other program checkpoints and restarts the WAL first, those changes are in `live.db` but
   are lost from history. If it commits between a walflip statement's commit and its capture,
   that `exec` fails with `statement produced N commits` (all of them are captured).
+- **`exec VACUUM` is expensive in history.** VACUUM rewrites every page, so each one writes
+  the whole database into `live.db-wal` and stores it again in `meta.db`. A small database
+  vacuumed often grows `meta.db` by its full size every time.
+- **`exec VACUUM` leaves a short gap for other programs.** VACUUM cannot run inside walflip's
+  `live.db` transaction, so walflip releases `live.db` (still holding the history lock, so other
+  `walflip exec` processes wait) and VACUUM then takes the write lock itself. A program that
+  writes `live.db` directly can commit in between; its commit is captured with the VACUUM's
+  label and that `exec` fails with `VACUUM produced 2 commits` (all of them are captured).
 - **`exec -` splits on lines**, not on `;`: one statement per non-blank line, no trailing `;` required. A statement that spans several lines fails with `incomplete input` and nothing from that line is committed (earlier lines stay committed). Pass multi-line or multi-statement SQL as one statement per `exec` argument, or put each statement on its own line.
 - **Foreign writers with `POWERSAFE_OVERWRITE` off** (`?psow=0` plus `synchronous=FULL`) make SQLite repeat each commit frame to pad a sector. walflip does not merge them: each padding frame is a separate commit labelled `(recovered)`, so history can show more commits than statements. Replay is still exact, since the copies are identical pages. walflip's own connection never pads.
 - **History is page-level.** The WAL contains pages, not statements. The `sql` shown by
@@ -174,8 +190,8 @@ catalogued in `docs/TESTING_PLAN.md`, section 1:
   structure of `meta.db`, `log`/`status` consistency, every `clone -n k` against a shadow
   SQLite model, `clone` of the last commit against `live.db` byte for byte, and that cloning
   changes no file. The steps cover DDL and quoted table names, schema files, large blobs,
-  external `VACUUM`, failed statements, rename and drop, env vs flags, and concurrency:
-  parallel clones, parallel `exec`, a held reader, a writer killed mid-life, and a lock holder
+  `exec VACUUM` and external `VACUUM`, failed statements, rename and drop, env vs flags, and
+  concurrency: parallel clones, parallel `exec`, a held reader, a writer killed mid-life, and a lock holder
   that dies.
 - **Round-trip tests** (`tests/roundtrip.rs`) run random insert/update/delete sequences on a
   real database and assert that `clone -n k` equals the live contents after step *k*.

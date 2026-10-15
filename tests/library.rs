@@ -1,14 +1,16 @@
 //! Library-level scenarios (docs/TESTING_PLAN.md section 3.2): steps the CLI cannot express,
 //! driven through `walflip::db`, `walflip::store` and `walflip::replay` directly.
 //!
-//! - S9: an external `VACUUM` shrinks the db; history records the shrink and replays it (INV-42),
-//!   and `exec VACUUM` fails without changing anything (INV-37).
+//! - S9: `VACUUM` shrinks the db; history records the shrink and replays it (INV-42). (a) through
+//!   `exec` (plan Q4: one commit, also inside a stdin batch; `VACUUM INTO` and look-alikes are
+//!   rejected without changing anything, INV-37); (b) by an external connection.
 //! - S11: clone chain; replaying frames n+1..=m onto clone(n) gives clone(m) (INV-32, INV-31).
 //! - INV-23: the capture cursor matches the live WAL header while a reader pins the WAL.
 mod common;
 
 use common::invariants::{assert_invariants, Checks, FileHashes, Observed};
 use common::model::Model;
+use common::{parse_captured, Harness};
 use rusqlite::Connection;
 use std::fs;
 use std::path::Path;
@@ -32,7 +34,7 @@ fn exec(d: &Db, m: &mut Model, sql: &str) -> u64 {
 
 /// ExternalVacuum step: a foreign connection vacuums live.db with checkpointing off, and the
 /// still-present WAL is captured before that connection closes (and checkpoints it away).
-/// `exec` cannot do this itself (S9a), so it is the only way to record a shrinking commit.
+/// `exec VACUUM` does the same through walflip (S9a); this step covers a foreign VACUUM.
 fn external_vacuum(d: &Db, m: &mut Model) {
     let conn = Connection::open(&d.live).unwrap();
     conn.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
@@ -67,27 +69,127 @@ fn root_and_tmp() -> (tempfile::TempDir, std::path::PathBuf) {
 
 const S9_SCHEMA: &str = "CREATE TABLE t(id INTEGER PRIMARY KEY, body BLOB);";
 
+/// Model step for a `VACUUM` that walflip captured as `n` commits: contents are unchanged, so
+/// each commit's snapshot is the current one (the shadow cannot run VACUUM inside its
+/// per-statement transaction).
+fn vacuum_in_model(m: &mut Model, n: u64) {
+    m.exec_sum += n;
+    for _ in 0..n {
+        m.snapshots.push(Some(m.current()));
+    }
+}
+
+/// Run `sql` (a bare VACUUM form) through `db::exec`; it must be exactly one commit.
+fn exec_vacuum(d: &Db, m: &mut Model, sql: &str) {
+    let n = db::exec(d, &[sql.to_string()]).unwrap_or_else(|e| panic!("exec {sql}: {e:#}")) as u64;
+    assert_eq!(n, 1, "Q4: `{sql}` should be exactly one commit");
+    vacuum_in_model(m, n);
+}
+
+/// Q4: `exec VACUUM` runs outside a transaction and is captured as one commit; `db_pages`
+/// shrinks at it (INV-42) and `clone -n total` is `live.db` byte for byte (INV-31).
 #[test]
-fn s9a_exec_vacuum_errors_and_changes_nothing() {
-    let (_tmp, root) = root_and_tmp();
+fn s9a_exec_vacuum_is_one_shrinking_commit() {
+    let (tmp, root) = root_and_tmp();
     let d = create(&root, "vac", S9_SCHEMA);
     let mut m = Model::new(Some(S9_SCHEMA));
-    exec(&d, &mut m, "INSERT INTO t(body) VALUES (zeroblob(20000))");
-    exec(&d, &mut m, "DELETE FROM t");
-    let before_obs = Observed::of(&d);
-    let before_hashes = FileHashes::of(&d.dir);
+    for i in 0..4 {
+        exec(&d, &mut m, &format!("INSERT INTO t(body) VALUES (zeroblob({}))", 30000 + i));
+    }
+    exec(&d, &mut m, "DELETE FROM t WHERE id > 1");
+    let pages_before = Observed::of(&d).log.last().unwrap().db_pages;
 
-    // `exec` wraps every statement in a transaction, and SQLite refuses VACUUM inside one.
-    let err = db::exec(&d, &["VACUUM".to_string()]).expect_err("exec VACUUM should fail today (plan Q4)");
-    assert!(format!("{err:#}").contains("VACUUM"), "error names the statement: {err:#}");
-    m.failed("VACUUM");
+    exec_vacuum(&d, &mut m, "VACUUM");
+    let o = assert_invariants(&root, "vac", Some(&m), Checks::full());
+    let s = o.commits;
+    let last = o.log.last().unwrap();
+    assert_eq!(last.sql, "VACUUM");
+    assert!(last.db_pages < pages_before, "INV-42: db_pages {pages_before} -> {}", last.db_pages);
+    let c_prev = clone_bytes(&d, s - 1, tmp.path());
+    let c_s = clone_bytes(&d, s, tmp.path());
+    assert!(c_s.len() < c_prev.len(), "INV-42: clone({s}) !< clone({})", s - 1);
+    assert!(fs::metadata(d.wal_path()).is_err(), "WAL checkpointed away after exec");
+    assert!(c_s == fs::read(&d.live).unwrap(), "INV-31: clone(total) != live.db after exec VACUUM");
 
-    assert_eq!(Observed::of(&d), before_obs, "INV-37: status/log changed after a failed VACUUM");
-    let after_hashes = FileHashes::of(&d.dir);
-    for f in ["live.db", "base.db", "meta.db"] {
-        assert_eq!(before_hashes.0[f], after_hashes.0[f], "INV-37: {f} changed after a failed VACUUM");
+    // Lowercase, trailing `;`, and the explicit `main` schema take the same path.
+    for sql in ["vacuum;", "VACUUM main", "  Vacuum \"main\" ;  "] {
+        exec_vacuum(&d, &mut m, sql);
+        assert_eq!(Observed::of(&d).log.last().unwrap().sql, sql);
+    }
+    exec(&d, &mut m, "INSERT INTO t(body) VALUES (zeroblob(40000))");
+    let fin = assert_invariants(&root, "vac", Some(&m), Checks::full());
+    assert!(clone_bytes(&d, fin.commits, tmp.path()) == fs::read(&d.live).unwrap(), "INV-31 after growth");
+}
+
+/// Q4: `VACUUM INTO` stays denied, in any spelling that reaches SQLite: nothing is committed, no
+/// file of the db folder changes (INV-37), and the target file is never created.
+#[test]
+fn s9a_vacuum_into_is_denied_and_creates_no_file() {
+    let (tmp, root) = root_and_tmp();
+    let d = create(&root, "vac", S9_SCHEMA);
+    let mut m = Model::new(Some(S9_SCHEMA));
+    exec(&d, &mut m, "INSERT INTO t(body) VALUES (zeroblob(5000))");
+    let target = tmp.path().join("copy.db");
+    let t = target.display();
+    for (i, sql) in [
+        format!("VACUUM INTO '{t}'"),
+        format!("vacuum main into '{t}';"),
+        format!("SELECT 1; VACUUM INTO '{t}'"),
+        format!("/* c */ VACUUM INTO '{t}'"),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let (obs, hashes) = (Observed::of(&d), FileHashes::of(&d.dir));
+        let err = format!("{:#}", db::exec(&d, &[sql.clone()]).expect_err("VACUUM INTO must fail"));
+        if i < 2 {
+            assert!(err.contains("VACUUM INTO") && err.contains("not allowed"), "clear message: {err}");
+        }
+        assert!(!target.exists(), "VACUUM INTO created {t}: {sql}");
+        assert_eq!(Observed::of(&d), obs, "INV-37: status/log changed after: {sql}");
+        let after = FileHashes::of(&d.dir);
+        for f in ["live.db", "base.db", "meta.db"] {
+            assert_eq!(hashes.0[f], after.0[f], "INV-37: {f} changed after: {sql}");
+        }
+        m.failed(sql);
     }
     assert_invariants(&root, "vac", Some(&m), Checks::full());
+}
+
+/// Q4 with `exec -`: VACUUM on its own line between inserts is one commit among three; a line
+/// that only starts with VACUUM (`VACUUM; DROP TABLE t`, one statement per line) is rejected as a
+/// whole, so `t` is not dropped, earlier lines stay committed and later lines never run.
+#[test]
+fn s9a_vacuum_in_a_stdin_batch() {
+    let h = Harness::new();
+    h.create("vb", S9_SCHEMA);
+    let d = Db::existing(&h.root(), "vb").unwrap();
+    let mut m = Model::new(Some(S9_SCHEMA));
+    let (a, b) = ("INSERT INTO t(body) VALUES (zeroblob(9000))", "DELETE FROM t WHERE id = 1");
+    let o = h.with_stdin(&["--db", "vb", "exec", "-"], &format!("{a}\n{a}\n{b}\nVACUUM\n{a}\n"));
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert_eq!(parse_captured(&String::from_utf8(o.stdout).unwrap()), 5);
+    m.exec(a, 1);
+    m.exec(a, 1);
+    m.exec(b, 1);
+    vacuum_in_model(&mut m, 1);
+    m.exec(a, 1);
+    let labels: Vec<String> = Observed::of(&d).log.iter().map(|r| r.sql.clone()).collect();
+    assert_eq!(labels, [a, a, b, "VACUUM", a]);
+    assert_invariants(&h.root(), "vb", Some(&m), Checks::full());
+
+    let o = h.with_stdin(&["--db", "vb", "exec", "-"], &format!("{a}\nVACUUM; DROP TABLE t\n{a}\n"));
+    assert!(!o.status.success());
+    let err = String::from_utf8(o.stderr).unwrap();
+    assert!(err.contains("only a bare `VACUUM`") && err.contains("statement 2"), "{err}");
+    m.exec(a, 1);
+    let o = assert_invariants(&h.root(), "vb", Some(&m), Checks::full());
+    assert_eq!(o.commits, 6, "line 1 committed, line 2 rejected, line 3 never ran");
+    // The same text as one `exec` argument is one statement too, so it is rejected whole.
+    let err = h.err(&["--db", "vb", "exec", "VACUUM; DROP TABLE t"]);
+    assert!(err.contains("only a bare `VACUUM`"), "{err}");
+    assert_eq!(common::ints(&d.live, "SELECT count(*) FROM sqlite_master WHERE name = 't'"), [1]);
+    assert_invariants(&h.root(), "vb", Some(&m), Checks::full());
 }
 
 #[test]
