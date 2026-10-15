@@ -121,7 +121,7 @@ fn install_authorizer(conn: &Connection, mode: Option<Arc<AtomicU8>>) -> Denied 
     let slot = denied.clone();
     conn.authorizer(Some(move |ctx: AuthContext<'_>| {
         let m = mode.as_deref().map_or(AuthMode::Own, AuthMode::load);
-        match deny_reason(&ctx.action, m) {
+        match deny_reason(&ctx.action, m).or_else(|| sandbox_deny(&ctx.action)) {
             Some(reason) => {
                 *slot.lock().unwrap() = Some(reason);
                 Authorization::Deny
@@ -149,6 +149,59 @@ fn deny_reason(action: &AuthAction<'_>, mode: AuthMode) -> Option<String> {
     }
 }
 
+/// Fuzz-only sandbox (T21, `testing` feature): an extra authorizer deny rule and a setup step
+/// (limits, progress handler, ...) for every `live.db` connection that `create` and `exec` open.
+/// Nothing is installed unless a test calls [`sandbox::install`], so behaviour is unchanged. SQLite
+/// allows one authorizer per connection, so the extra rule is consulted by walflip's own
+/// authorizer after [`deny_reason`], never installed as a second one.
+#[cfg(feature = "testing")]
+pub mod sandbox {
+    use rusqlite::hooks::AuthAction;
+    use rusqlite::Connection;
+    use std::sync::OnceLock;
+
+    pub struct Sandbox {
+        /// Extra denials on top of walflip's (`Some(reason)` denies).
+        pub deny: fn(&AuthAction<'_>) -> Option<String>,
+        /// Run on each `live.db` connection right after it is opened.
+        pub setup: fn(&Connection) -> rusqlite::Result<()>,
+    }
+
+    static SANDBOX: OnceLock<Sandbox> = OnceLock::new();
+
+    /// Install for the rest of the process. Returns false if one was already installed.
+    pub fn install(s: Sandbox) -> bool {
+        SANDBOX.set(s).is_ok()
+    }
+
+    pub(super) fn get() -> Option<&'static Sandbox> {
+        SANDBOX.get()
+    }
+}
+
+#[cfg(feature = "testing")]
+fn sandbox_deny(action: &AuthAction<'_>) -> Option<String> {
+    sandbox::get().and_then(|s| (s.deny)(action))
+}
+
+#[cfg(not(feature = "testing"))]
+fn sandbox_deny(_: &AuthAction<'_>) -> Option<String> {
+    None
+}
+
+#[cfg(feature = "testing")]
+fn sandbox_setup(conn: &Connection) -> Result<()> {
+    if let Some(s) = sandbox::get() {
+        (s.setup)(conn)?;
+    }
+    Ok(())
+}
+
+#[cfg(not(feature = "testing"))]
+fn sandbox_setup(_: &Connection) -> Result<()> {
+    Ok(())
+}
+
 /// Turn a failure into an error that names what the authorizer denied, if anything.
 fn with_denial<T>(r: rusqlite::Result<T>, denied: &Denied, what: String) -> Result<T> {
     r.map_err(|e| match denied.lock().unwrap().take() {
@@ -167,6 +220,7 @@ fn assert_wal(conn: &Connection) -> Result<()> {
 
 fn init_files(db: &Db, schema: Option<&str>) -> Result<u32> {
     let conn = Connection::open(&db.live)?;
+    sandbox_setup(&conn)?;
     // Schema first, in rollback mode, so page_size/auto_vacuum pragmas take effect.
     if let Some(sql) = schema {
         let denied = install_authorizer(&conn, None);
@@ -318,6 +372,7 @@ type AfterCommit = Option<Box<dyn Fn()>>;
 fn exec_inner(db: &Db, statements: &[String], busy: Duration, after_commit: AfterCommit) -> Result<ExecReport> {
     let mut store = Store::open_with_timeout(&db.meta, busy)?;
     let conn = Connection::open(&db.live)?;
+    sandbox_setup(&conn)?;
     conn.busy_timeout(busy)?;
     assert_wal(&conn)?;
     let mode = Arc::new(AtomicU8::new(AuthMode::Own as u8));

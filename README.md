@@ -197,9 +197,11 @@ catalogued in `docs/TESTING_PLAN.md`, section 1:
   real database and assert that `clone -n k` equals the live contents after step *k*.
 - **Perf smoke** (`tests/perf.rs`): a 2000-statement stdin batch (default). Run the
   2000-process variant with `-- --ignored --nocapture`.
-- **Fuzzing** (`fuzz/`, cargo-fuzz, 5 targets): `wal_parse` (raw bytes), `wal_differential`
+- **Fuzzing** (`fuzz/`, cargo-fuzz, 6 targets): `wal_parse` (raw bytes), `wal_differential`
   (encoder plus mutations, differential against the input), `replay_apply`, `store_capture`
-  (real SQLite I/O) and `statements_split`. CI builds the targets and replays the committed
+  (real SQLite I/O), `statements_split`, and `exec_sql`, which runs structured SQL programs
+  through `create` and `exec` in a sandbox and checks after every `exec` that history clones
+  to exactly `live.db`. CI builds the targets and replays the committed
   corpora on every PR, and fuzzes each target for 5 minutes nightly. `fuzz/README.md` describes
   crash triage. A local `make fuzz` adds new inputs to `fuzz/corpus/`; minimise them before
   committing (`cargo +nightly fuzz cmin <target>`).

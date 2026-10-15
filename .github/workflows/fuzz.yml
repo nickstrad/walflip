@@ -10,7 +10,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [wal_parse, wal_differential, replay_apply, store_capture, statements_split]
+        target: [wal_parse, wal_differential, replay_apply, store_capture, statements_split, exec_sql]
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@nightly
@@ -22,6 +22,7 @@ jobs:
         run: |
           extra=""
           if [ "${{ matrix.target }}" = wal_parse ]; then extra="-max_len=70000"; fi
+          if [ "${{ matrix.target }}" = exec_sql ]; then extra="-timeout=30"; fi
           cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=300 -rss_limit_mb=1024 -dict=fuzz/wal.dict $extra
       - uses: actions/upload-artifact@v4
         if: failure()

@@ -14,10 +14,10 @@ test:
 
 # Coverage-guided fuzzing (needs nightly + cargo-fuzz); FUZZ_SECS per target
 FUZZ_SECS ?= 30
-FUZZ_TARGETS := wal_parse wal_differential replay_apply store_capture statements_split
+FUZZ_TARGETS := wal_parse wal_differential replay_apply store_capture statements_split exec_sql
 fuzz:
 	@for t in $(FUZZ_TARGETS); do \
-	  extra=""; [ $$t = wal_parse ] && extra="-max_len=70000"; \
+	  extra=""; [ $$t = wal_parse ] && extra="-max_len=70000"; [ $$t = exec_sql ] && extra="-timeout=30"; \
 	  echo "== $$t =="; \
 	  cargo +nightly fuzz run $$t -- -max_total_time=$(FUZZ_SECS) -rss_limit_mb=1024 -dict=fuzz/wal.dict $$extra || exit 1; \
 	done
@@ -25,7 +25,7 @@ fuzz:
 # Replay committed corpora once (regression check)
 fuzz-replay:
 	@for t in $(FUZZ_TARGETS); do \
-	  extra=""; [ $$t = wal_parse ] && extra="-max_len=70000"; \
+	  extra=""; [ $$t = wal_parse ] && extra="-max_len=70000"; [ $$t = exec_sql ] && extra="-timeout=30"; \
 	  cargo +nightly fuzz run $$t fuzz/corpus/$$t -- -runs=0 -rss_limit_mb=1024 -dict=fuzz/wal.dict $$extra || exit 1; \
 	done
 

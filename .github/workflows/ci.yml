@@ -23,7 +23,7 @@ jobs:
       - run: cargo +nightly fuzz build
       - name: Replay committed corpora
         run: |
-          for t in wal_parse wal_differential replay_apply store_capture statements_split; do
+          for t in wal_parse wal_differential replay_apply store_capture statements_split exec_sql; do
             extra=""
             if [ "$t" = wal_parse ]; then extra="-max_len=70000"; fi
             cargo +nightly fuzz run "$t" "fuzz/corpus/$t" -- -runs=0 -rss_limit_mb=1024 -dict=fuzz/wal.dict $extra

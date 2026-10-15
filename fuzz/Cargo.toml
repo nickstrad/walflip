@@ -14,6 +14,11 @@ libfuzzer-sys = "0.4"
 path = ".."
 features = ["testing"]
 
+# Same version as walflip's, so `Connection` is one type; `limits` is for the exec_sql sandbox.
+[dependencies.rusqlite]
+version = "0.32"
+features = ["bundled", "hooks", "limits"]
+
 [dependencies.arbitrary]
 version = "1"
 features = ["derive"]
@@ -49,6 +54,13 @@ bench = false
 [[bin]]
 name = "statements_split"
 path = "fuzz_targets/statements_split.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "exec_sql"
+path = "fuzz_targets/exec_sql.rs"
 test = false
 doc = false
 bench = false
