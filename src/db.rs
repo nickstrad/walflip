@@ -222,7 +222,16 @@ pub fn clone_at(db: &Db, n: u64, out: &Path) -> Result<usize> {
     };
 
     let mut image = fs::read(&db.base)?;
-    replay::apply(&mut image, page_size, frames.iter().map(|(p, d)| (*p, d.as_slice())), db_pages)?;
+    // Allocation bound: earlier commits may reference pages above a later, shrunken db_pages, so
+    // use the max of the base size and db_pages over commits 1..=n (not just commit n's).
+    let base_pages = (image.len() / page_size) as u64;
+    let max_recorded: Option<u32> = store.conn().query_row(
+        "SELECT max(db_pages) FROM commits WHERE idx <= ?1",
+        [n],
+        |r| r.get(0),
+    )?;
+    let max_pages = base_pages.max(max_recorded.unwrap_or(0) as u64).min(u32::MAX as u64) as u32;
+    replay::apply(&mut image, page_size, frames.iter().map(|(p, d)| (*p, d.as_slice())), db_pages, max_pages)?;
     fs::write(out, &image)?;
     Ok(frames.len())
 }
@@ -265,6 +274,22 @@ mod tests {
                 prop_assert!(!s.is_empty() && s.len() <= MAX_NAME);
                 prop_assert!(s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'));
             }
+        }
+    }
+
+    #[test]
+    fn clone_works_after_a_later_commit_shrinks_the_db() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = Db::new(tmp.path(), "shrink").unwrap();
+        create(&d, Some("PRAGMA auto_vacuum=FULL; CREATE TABLE a(x BLOB); CREATE TABLE b(x BLOB);")).unwrap();
+        let big = "INSERT INTO a VALUES (zeroblob(100000));".to_string();
+        exec(&d, &[big]).unwrap();
+        exec(&d, &["DROP TABLE a;".to_string()]).unwrap();
+        let total = Store::open(&d.meta).unwrap().commit_count().unwrap();
+        for n in 0..=total {
+            let out = tmp.path().join(format!("c{n}.db"));
+            clone_at(&d, n, &out).unwrap();
+            assert_eq!(summarize(&out).unwrap().integrity, "ok", "commit {n}");
         }
     }
 
