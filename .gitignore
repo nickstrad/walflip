@@ -2,3 +2,4 @@ target
 walflip-data
 fuzz/target
 fuzz/artifacts
+.claude/
